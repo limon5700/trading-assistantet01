@@ -38,9 +38,9 @@ export interface TradingOverlayPlugin {
    * widget foreground service. Rejects when the draw-over-apps permission is
    * missing or the user declines capture.
    */
-  startOverlay(options: { serverUrl: string }): Promise<StartOverlayResult>;
+  startOverlay(options: { serverUrl: string; token?: string }): Promise<StartOverlayResult>;
   stopOverlay(): Promise<void>;
-  updateServerUrl(options: { serverUrl: string }): Promise<void>;
+  updateServerUrl(options: { serverUrl: string; token?: string }): Promise<void>;
   /** Forces an immediate screenshot + analysis cycle. */
   analyzeNow(): Promise<void>;
   addListener(

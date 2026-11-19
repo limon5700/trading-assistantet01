@@ -1,4 +1,18 @@
-import type { KnowledgeEntry, KnowledgeSummary, LoginResponse, UploadResult } from './types';
+import type {
+  ActivationCode,
+  Activity,
+  ActivityAction,
+  AdminUser,
+  AppSettings,
+  KnowledgeEntry,
+  KnowledgeSummary,
+  LoginResponse,
+  Paged,
+  Plan,
+  PlanInput,
+  UploadResult,
+  UserStats,
+} from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const TOKEN_KEY = 'ai_trading_admin_token';
@@ -176,5 +190,116 @@ export const api = {
 
       xhr.send(form);
     });
+  },
+
+  /* ------------------------------------------------------------ settings -- */
+
+  getSettings(): Promise<{ settings: AppSettings }> {
+    return request('/api/admin/settings');
+  },
+
+  updateSettings(patch: Partial<AppSettings>): Promise<{ settings: AppSettings }> {
+    return request('/api/admin/settings', { method: 'PUT', body: JSON.stringify(patch) });
+  },
+
+  /* --------------------------------------------------------------- plans -- */
+
+  listPlans(): Promise<{ items: Plan[] }> {
+    return request('/api/admin/plans');
+  },
+
+  createPlan(input: PlanInput): Promise<{ item: Plan }> {
+    return request('/api/admin/plans', { method: 'POST', body: JSON.stringify(input) });
+  },
+
+  updatePlan(id: number, input: Partial<PlanInput>): Promise<{ item: Plan }> {
+    return request(`/api/admin/plans/${id}`, { method: 'PUT', body: JSON.stringify(input) });
+  },
+
+  deletePlan(id: number): Promise<{ ok: boolean; id: number }> {
+    return request(`/api/admin/plans/${id}`, { method: 'DELETE' });
+  },
+
+  /* ---------------------------------------------------- activation codes -- */
+
+  listActivationCodes(input: {
+    status?: '' | 'used' | 'unused' | 'expired';
+    page?: number;
+    pageSize?: number;
+  } = {}): Promise<Paged<ActivationCode>> {
+    const params = new URLSearchParams();
+    if (input.status) params.set('status', input.status);
+    if (input.page) params.set('page', String(input.page));
+    if (input.pageSize) params.set('page_size', String(input.pageSize));
+    const query = params.toString();
+    return request(`/api/admin/activation-codes${query ? `?${query}` : ''}`);
+  },
+
+  generateActivationCode(input: {
+    userId: number;
+    planId: number;
+    expiresInDays?: number | null;
+  }): Promise<{ item: ActivationCode }> {
+    return request('/api/admin/activation-codes/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        user_id: input.userId,
+        plan_id: input.planId,
+        ...(input.expiresInDays ? { expires_in_days: input.expiresInDays } : {}),
+      }),
+    });
+  },
+
+  deleteActivationCode(id: number): Promise<{ ok: boolean; id: number }> {
+    return request(`/api/admin/activation-codes/${id}`, { method: 'DELETE' });
+  },
+
+  /* --------------------------------------------------------------- users -- */
+
+  listUsers(input: {
+    search?: string;
+    status?: '' | 'PENDING' | 'ACTIVE' | 'SUSPENDED';
+    page?: number;
+    pageSize?: number;
+  } = {}): Promise<Paged<AdminUser> & { stats: UserStats }> {
+    const params = new URLSearchParams();
+    if (input.search) params.set('search', input.search);
+    if (input.status) params.set('status', input.status);
+    if (input.page) params.set('page', String(input.page));
+    if (input.pageSize) params.set('page_size', String(input.pageSize));
+    const query = params.toString();
+    return request(`/api/admin/users${query ? `?${query}` : ''}`);
+  },
+
+  updateUserStatus(
+    id: number,
+    patch: { accountStatus?: AdminUser['account_status']; activePlanId?: number | null },
+  ): Promise<{ item: AdminUser }> {
+    return request(`/api/admin/users/${id}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        ...(patch.accountStatus !== undefined ? { account_status: patch.accountStatus } : {}),
+        ...(patch.activePlanId !== undefined ? { active_plan_id: patch.activePlanId } : {}),
+      }),
+    });
+  },
+
+  deleteUser(id: number): Promise<{ ok: boolean; id: number }> {
+    return request(`/api/admin/users/${id}`, { method: 'DELETE' });
+  },
+
+  /* ---------------------------------------------------------- activities -- */
+
+  listActivities(input: {
+    page?: number;
+    pageSize?: number;
+    action?: ActivityAction | '';
+  } = {}): Promise<Paged<Activity>> {
+    const params = new URLSearchParams();
+    if (input.page) params.set('page', String(input.page));
+    if (input.pageSize) params.set('page_size', String(input.pageSize));
+    if (input.action) params.set('action', input.action);
+    const query = params.toString();
+    return request(`/api/admin/activities${query ? `?${query}` : ''}`);
   },
 };

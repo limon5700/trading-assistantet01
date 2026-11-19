@@ -4,6 +4,11 @@ import { RequireAuth } from './components/RequireAuth';
 import { ToastProvider } from './components/ToastProvider';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
+import UsersPage from './pages/UsersPage';
+import PlansPage from './pages/PlansPage';
+import ActivationCodesPage from './pages/ActivationCodesPage';
+import SettingsPage from './pages/SettingsPage';
+import ActivitiesPage from './pages/ActivitiesPage';
 
 export default function App() {
   return (
@@ -17,6 +22,46 @@ export default function App() {
               element={
                 <RequireAuth>
                   <DashboardPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/users"
+              element={
+                <RequireAuth>
+                  <UsersPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/plans"
+              element={
+                <RequireAuth>
+                  <PlansPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/activation-codes"
+              element={
+                <RequireAuth>
+                  <ActivationCodesPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/activities"
+              element={
+                <RequireAuth>
+                  <ActivitiesPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <RequireAuth>
+                  <SettingsPage />
                 </RequireAuth>
               }
             />

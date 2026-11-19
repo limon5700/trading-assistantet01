@@ -193,6 +193,7 @@ class OverlayPlugin : Plugin() {
         }
 
         persistServerUrl(serverUrl)
+        call.getString("token")?.takeIf { it.isNotBlank() }?.let { persistUserToken(it) }
 
         val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
             as? android.media.projection.MediaProjectionManager
@@ -222,11 +223,13 @@ class OverlayPlugin : Plugin() {
         }
 
         val serverUrl = call.getString("serverUrl")?.trim()?.trimEnd('/').orEmpty()
+        val userToken = call.getString("token").orEmpty()
         val intent = Intent(context, FloatingWidgetService::class.java).apply {
             action = FloatingWidgetService.ACTION_START
             putExtra(FloatingWidgetService.EXTRA_RESULT_CODE, result.resultCode)
             putExtra(FloatingWidgetService.EXTRA_RESULT_DATA, data)
             putExtra(FloatingWidgetService.EXTRA_SERVER_URL, serverUrl)
+            putExtra(FloatingWidgetService.EXTRA_USER_TOKEN, userToken)
         }
 
         try {
@@ -258,10 +261,15 @@ class OverlayPlugin : Plugin() {
             return
         }
         persistServerUrl(serverUrl)
+        val userToken = call.getString("token")
+        if (!userToken.isNullOrBlank()) persistUserToken(userToken)
         if (FloatingWidgetService.isRunning) {
             val intent = Intent(context, FloatingWidgetService::class.java).apply {
                 action = FloatingWidgetService.ACTION_UPDATE_SERVER
                 putExtra(FloatingWidgetService.EXTRA_SERVER_URL, serverUrl)
+                if (!userToken.isNullOrBlank()) {
+                    putExtra(FloatingWidgetService.EXTRA_USER_TOKEN, userToken)
+                }
             }
             context.startService(intent)
         }
@@ -285,6 +293,13 @@ class OverlayPlugin : Plugin() {
         context.getSharedPreferences(FloatingWidgetService.PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(FloatingWidgetService.KEY_SERVER_URL, serverUrl)
+            .apply()
+    }
+
+    private fun persistUserToken(token: String) {
+        context.getSharedPreferences(FloatingWidgetService.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(FloatingWidgetService.KEY_USER_TOKEN, token)
             .apply()
     }
 }

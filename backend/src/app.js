@@ -4,6 +4,8 @@ import cookieParser from 'cookie-parser';
 import { config } from './config.js';
 import { requireAdmin } from './auth.js';
 import authRoutes from './routes/auth.js';
+import userAuthRoutes from './routes/userAuth.js';
+import adminRoutes from './routes/admin.js';
 import knowledgeRoutes from './routes/knowledge.js';
 import analyzeRoutes from './routes/analyze.js';
 
@@ -35,8 +37,15 @@ export function createApp() {
     res.json({ ok: true, service: 'ai-trading-backend', time: new Date().toISOString() });
   });
 
+  // App users: signup, login, session, activation codes.
+  app.use('/api/auth', userAuthRoutes);
+
+  // Admin: login/session (authRoutes) plus the management endpoints.
   app.use('/api/admin', authRoutes);
   app.use('/api/admin/knowledge', requireAdmin, knowledgeRoutes);
+  app.use('/api/admin', requireAdmin, adminRoutes);
+
+  // Chart analysis requires a signed-in, activated app user.
   app.use('/api', analyzeRoutes);
 
   app.use((req, res) => {

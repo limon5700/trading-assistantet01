@@ -2,6 +2,8 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { analyzeChart } from '../services/gemini.js';
 import { config } from '../config.js';
+import { requireUser } from '../auth.js';
+import { findUserById, logActivity } from '../services/accounts.js';
 
 const router = express.Router();
 
@@ -48,8 +50,24 @@ function normalizeImage(input) {
   return { data, mimeType };
 }
 
-router.post('/analyze-chart', analyzeLimiter, async (req, res, next) => {
+router.post('/analyze-chart', analyzeLimiter, requireUser, async (req, res, next) => {
   try {
+    // Re-read the account on every scan so suspensions and activations apply immediately.
+    const user = await findUserById(req.userId);
+    if (!user) {
+      return res.status(401).json({ error: 'Account not found', code: 'ACCOUNT_MISSING' });
+    }
+    if (user.account_status !== 'ACTIVE') {
+      return res.status(403).json({
+        error:
+          user.account_status === 'SUSPENDED'
+            ? 'Your account is suspended. Please contact support.'
+            : 'Your account is pending activation. Enter your activation code in the app.',
+        code: 'ACCOUNT_NOT_ACTIVE',
+        account_status: user.account_status,
+      });
+    }
+
     const { imageBase64, currentTime, timezone } = req.body ?? {};
     const image = normalizeImage(imageBase64);
     if (image.error) return res.status(400).json({ error: image.error });
@@ -59,6 +77,17 @@ router.post('/analyze-chart', analyzeLimiter, async (req, res, next) => {
       mimeType: image.mimeType,
       currentTime: typeof currentTime === 'string' ? currentTime.slice(0, 64) : '',
       timezone: typeof timezone === 'string' ? timezone.slice(0, 64) : '',
+    });
+
+    await logActivity({
+      userId: user.id,
+      action: 'SIGNAL_SCAN',
+      details: {
+        signal: analysis.signal,
+        confidence: analysis.confidence,
+        timeframe: analysis.timeframe_detected,
+        knowledge_entries: knowledgeEntriesUsed,
+      },
     });
 
     res.set('Cache-Control', 'no-store');

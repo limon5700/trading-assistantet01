@@ -47,6 +47,7 @@ export const config = {
   jwt: {
     secret: required('JWT_SECRET'),
     expiresIn: process.env.JWT_EXPIRES_IN || '12h',
+    userExpiresIn: process.env.USER_JWT_EXPIRES_IN || '30d',
   },
   admin: {
     email: required('ADMIN_EMAIL').toLowerCase(),

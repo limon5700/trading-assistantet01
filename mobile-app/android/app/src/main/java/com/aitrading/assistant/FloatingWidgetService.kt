@@ -65,12 +65,14 @@ class FloatingWidgetService : Service() {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
         const val EXTRA_SERVER_URL = "server_url"
+        const val EXTRA_USER_TOKEN = "user_token"
         const val EXTRA_ANALYSIS = "analysis"
         const val EXTRA_RUNNING = "running"
         const val EXTRA_MESSAGE = "message"
 
         const val PREFS_NAME = "trading_overlay"
         const val KEY_SERVER_URL = "server_url"
+        const val KEY_USER_TOKEN = "user_token"
 
         private const val CHANNEL_ID = "trading_overlay_channel"
         private const val NOTIFICATION_ID = 4310
@@ -104,6 +106,7 @@ class FloatingWidgetService : Service() {
     private val networkExecutor = Executors.newSingleThreadExecutor()
     private var analyzing = false
     private var serverUrl: String = ""
+    private var userToken: String = ""
 
     private val analysisLoop = object : Runnable {
         override fun run() {
@@ -119,6 +122,7 @@ class FloatingWidgetService : Service() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         serverUrl = loadServerUrl()
+        userToken = loadUserToken()
         createNotificationChannel()
     }
 
@@ -141,6 +145,7 @@ class FloatingWidgetService : Service() {
                     serverUrl = it
                     updateStatus("Server updated")
                 }
+                intent.getStringExtra(EXTRA_USER_TOKEN)?.let { userToken = it }
             }
             else -> {
                 if (!isRunning) stopSelf()
@@ -158,6 +163,7 @@ class FloatingWidgetService : Service() {
             intent.getParcelableExtra(EXTRA_RESULT_DATA)
         }
         intent.getStringExtra(EXTRA_SERVER_URL)?.takeIf { it.isNotBlank() }?.let { serverUrl = it }
+        intent.getStringExtra(EXTRA_USER_TOKEN)?.takeIf { it.isNotBlank() }?.let { userToken = it }
 
         if (resultData == null || resultCode == 0) {
             broadcastError("Screen capture permission was not granted")
@@ -454,6 +460,9 @@ class FloatingWidgetService : Service() {
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=utf-8")
                     setRequestProperty("Accept", "application/json")
+                    if (userToken.isNotBlank()) {
+                        setRequestProperty("Authorization", "Bearer $userToken")
+                    }
                 }
                 connection = conn
 
@@ -603,6 +612,12 @@ class FloatingWidgetService : Service() {
     private fun loadServerUrl(): String {
         return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getString(KEY_SERVER_URL, "")
+            .orEmpty()
+    }
+
+    private fun loadUserToken(): String {
+        return getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_USER_TOKEN, "")
             .orEmpty()
     }
 

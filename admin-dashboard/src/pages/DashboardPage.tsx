@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../components/AuthProvider';
+import { AppShell } from '../components/AppShell';
 import { useToast } from '../components/ToastProvider';
 import { KnowledgeTable } from '../components/KnowledgeTable';
 import { TextKnowledgeModal } from '../components/TextKnowledgeModal';
@@ -12,9 +11,7 @@ import { ApiError, api } from '../lib/api';
 import type { KnowledgeEntry, KnowledgeSummary } from '../lib/types';
 
 export default function DashboardPage() {
-  const { email, logout } = useAuth();
   const toast = useToast();
-  const navigate = useNavigate();
 
   const [items, setItems] = useState<KnowledgeSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -112,37 +109,13 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleLogout() {
-    await logout();
-    navigate('/login', { replace: true });
-  }
-
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
-          <div className="flex items-center gap-3">
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-600 text-sm font-bold text-white">
-              AI
-            </span>
-            <div>
-              <h1 className="text-base font-semibold text-slate-900">Global Knowledge Manager</h1>
-              <p className="text-xs text-slate-500">
-                Rules injected into every chart analysis
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <span className="hidden text-xs text-slate-500 sm:inline">{email}</span>
-            <button type="button" className="btn-secondary" onClick={handleLogout}>
-              Sign out
-            </button>
-          </div>
+    <AppShell>
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-base font-semibold text-slate-900">Global Knowledge Manager</h1>
+          <p className="text-xs text-slate-500">Rules injected into every chart analysis</p>
         </div>
-      </header>
-
-      <main className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6">
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {[
             { label: 'Entries', value: stats.total },
@@ -244,7 +217,7 @@ export default function DashboardPage() {
         <p className="text-center text-xs text-slate-400">
           Only active entries are sent to Gemini with each screenshot.
         </p>
-      </main>
+      </div>
 
       <TextKnowledgeModal
         open={textModalOpen}
@@ -270,6 +243,6 @@ export default function DashboardPage() {
         onConfirm={() => void handleDelete()}
         onCancel={() => setDeleteTarget(null)}
       />
-    </div>
+    </AppShell>
   );
 }
