@@ -1,4 +1,5 @@
 apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
 
 // Optional release signing. The GitHub Actions workflow fills these from secrets;
 // local builds without them still produce an unsigned release build.
@@ -8,6 +9,15 @@ def hasReleaseKeystore = releaseKeystorePath && file(releaseKeystorePath).exists
 android {
     namespace "com.aitrading.assistant"
     compileSdk rootProject.ext.compileSdkVersion
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
 
     signingConfigs {
         release {
