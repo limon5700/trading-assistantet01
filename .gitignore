@@ -40,3 +40,6 @@ mobile-app/android/app/src/main/assets/public/
 mobile-app/android/app/src/main/assets/capacitor.config.json
 mobile-app/android/app/src/main/assets/capacitor.plugins.json
 mobile-app/android/.idea/
+
+# Local working copies of the split repositories
+repos/
