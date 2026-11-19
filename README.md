@@ -1,0 +1,90 @@
+# AI Trading Assistant & Floating Overlay System
+
+A production-ready monorepo with three deployable parts:
+
+| Folder | Stack | Purpose |
+| --- | --- | --- |
+| [`backend`](backend) | Node.js + Express + MySQL/SQLite + Gemini 2.5 Flash | Admin auth, global trading knowledge base, `/api/analyze-chart` vision endpoint |
+| [`admin-dashboard`](admin-dashboard) | React 18 + Vite + TypeScript + Tailwind | Light-mode panel to manage text rules and multi-page PDFs |
+| [`mobile-app`](mobile-app) | React + Vite + TypeScript + Capacitor + Kotlin | Android app with a draggable floating overlay and MediaProjection screen analysis |
+
+The Gemini API key exists only on the backend. Neither the dashboard bundle nor
+the Android APK ever receives it.
+
+## How it fits together
+
+```
+Admin dashboard ──CRUD──▶ Backend (knowledge_base table)
+                              ▲
+Android overlay ──screenshot + time + timezone──┘
+                              │
+                              ▼
+                   Gemini 2.5 Flash (strict JSON)
+                              │
+              {signal, entry_timing, confidence, timeframe_detected, reason}
+                              │
+                              ▼
+               Floating widget: BUY / SELL / WAIT
+```
+
+## Quick start
+
+### 1. Backend (SQLite, no external database)
+
+```bash
+cd backend
+cp .env.example .env         # set JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, GEMINI_API_KEY
+npm install
+npm run migrate
+npm start                    # http://localhost:4000
+```
+
+### 2. Admin dashboard
+
+```bash
+cd admin-dashboard
+cp .env.example .env
+npm install
+npm run dev                  # http://localhost:5173 (proxies /api to :4000)
+```
+
+Sign in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `backend/.env`.
+
+### 3. Mobile app
+
+```bash
+cd mobile-app
+cp .env.example .env         # VITE_DEFAULT_SERVER_URL = your deployed API
+npm install
+npm run dev                  # browser preview of the UI
+npm run build && npx cap sync android
+npx cap open android         # build/run with Android Studio (JDK 21)
+```
+
+In the Android app: set the server URL, grant **Display over other apps** and
+notifications, then tap **Start Trading Overlay Widget** and approve screen
+capture. The widget floats above Quotex, Exness, TradingView, MetaTrader, etc.
+
+## Deployment
+
+- **Backend** — Render/Railway/VPS instructions, MySQL mode and Nginx config are
+  in [`backend/README.md`](backend/README.md).
+- **Dashboard** — static `dist/` hosting notes are in
+  [`admin-dashboard/README.md`](admin-dashboard/README.md).
+- **Android** — GitHub Actions
+  [`.github/workflows/android.yml`](.github/workflows/android.yml) builds both
+  `.apk` and `.aab` on every push to `main`. Add the optional signing secrets
+  (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
+  `ANDROID_KEY_PASSWORD`) to produce signed release artifacts. Details in
+  [`mobile-app/README.md`](mobile-app/README.md).
+
+## Security notes
+
+- Admin endpoints accept an HTTP-only cookie **or** `Authorization: Bearer`.
+- Login is rate limited (20 per 15 min) and analysis is limited to 30 requests
+  per minute per IP.
+- Passwords are compared in constant time; JWTs expire after 12 hours.
+- Screenshots are processed in memory and never written to disk.
+- PDFs are limited by `MAX_UPLOAD_MB` and parsed page by page.
+
+Signals are generated technical analysis, not financial advice.
