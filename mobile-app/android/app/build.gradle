@@ -1,10 +1,15 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
-// Optional release signing. The GitHub Actions workflow fills these from secrets;
-// local builds without them still produce an unsigned release build.
+// Optional release signing. The GitHub Actions workflow exports these from the
+// release secrets, or from a temporary keystore it generates when no keystore
+// secret is configured. Local builds without them stay unsigned.
 def releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
-def hasReleaseKeystore = releaseKeystorePath && file(releaseKeystorePath).exists()
+def releaseKeystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+def releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+def releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: releaseKeystorePassword
+def hasReleaseKeystore = (releaseKeystorePath && file(releaseKeystorePath).exists() &&
+        releaseKeystorePassword && releaseKeyAlias)
 
 android {
     namespace "com.aitrading.assistant"
@@ -24,9 +29,11 @@ android {
         release {
             if (hasReleaseKeystore) {
                 storeFile file(releaseKeystorePath)
-                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+                enableV1Signing true
+                enableV2Signing true
             }
         }
     }
