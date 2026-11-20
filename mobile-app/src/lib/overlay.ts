@@ -3,10 +3,16 @@ import { registerPlugin } from '@capacitor/core';
 /** Mirrors the response contract of `POST /api/analyze-chart`. */
 export interface ChartAnalysis {
   signal: 'BUY' | 'SELL' | 'NO_TRADE';
-  entry_timing: string;
   confidence: number;
-  timeframe_detected: string;
+  /** `Next Candle` for an immediate entry, otherwise a local `HH:MM` time. */
+  entry_time: string;
+  /** Instrument shown on the chart, e.g. `EUR/USD` (`unknown` if unreadable). */
+  asset: string;
+  /** Chart interval, e.g. `1M`, `5M` (`unknown` if unreadable). */
+  timeframe: string;
   reason: string;
+  /** Spoken one-sentence summary of the decision. */
+  voice_summary: string;
 }
 
 export interface OverlayPermissionState {

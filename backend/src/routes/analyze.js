@@ -85,7 +85,8 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, async (req, res, next
       details: {
         signal: analysis.signal,
         confidence: analysis.confidence,
-        timeframe: analysis.timeframe_detected,
+        asset: analysis.asset,
+        timeframe: analysis.timeframe,
         knowledge_entries: knowledgeEntriesUsed,
       },
     });

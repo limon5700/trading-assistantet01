@@ -321,16 +321,24 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
               </span>
             </div>
             <div className="signal-grid">
+              <div className="signal-cell wide">
+                <span>Asset</span>
+                <strong>{analysis.asset}</strong>
+              </div>
               <div className="signal-cell">
-                <span>Entry timing</span>
-                <strong>{analysis.entry_timing}</strong>
+                <span>Entry time</span>
+                <strong>{analysis.entry_time}</strong>
               </div>
               <div className="signal-cell">
                 <span>Timeframe</span>
-                <strong>{analysis.timeframe_detected}</strong>
+                <strong>{analysis.timeframe}</strong>
               </div>
             </div>
             <p className="signal-reason">{analysis.reason}</p>
+            <p className="signal-voice">
+              <span>Voice</span>
+              {analysis.voice_summary}
+            </p>
           </>
         ) : (
           <p className="placeholder">

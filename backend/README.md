@@ -62,17 +62,29 @@ Then `npm run migrate`, which creates the `knowledge_base` table automatically
 | DELETE | `/api/admin/knowledge/:id` | admin | Delete an entry |
 | POST | `/api/analyze-chart` | – (rate limited) | `{ imageBase64, currentTime, timezone }` |
 
-`/api/analyze-chart` responds with exactly:
+`/api/analyze-chart` responds with exactly this strictly validated object —
+Gemini Vision is called with a JSON response schema, so every field is always
+present and no prose or extra keys can leak through:
 
 ```json
 {
   "signal": "BUY",
-  "entry_timing": "Next Candle",
   "confidence": 85,
-  "timeframe_detected": "5M",
-  "reason": "Bullish engulfing off the 5M demand zone with wick rejection"
+  "entry_time": "Next Candle",
+  "asset": "EUR/USD",
+  "timeframe": "5M",
+  "reason": "Bullish engulfing off the 5M demand zone with wick rejection",
+  "voice_summary": "Buy signal detected with 85 percent confidence."
 }
 ```
+
+- `signal` is `BUY`, `SELL` or `NO_TRADE`.
+- `confidence` is clamped to an integer 0–100.
+- `entry_time` is `Next Candle` for an immediate entry, otherwise local 24h
+  `HH:MM`; anything malformed falls back to `Next Candle`.
+- `asset` and `timeframe` fall back to `unknown` when unreadable.
+- `voice_summary` is a single spoken sentence and falls back to
+  `<Signal> signal detected with <n> percent confidence.`
 
 Uploaded PDFs are parsed page by page with `pdf-parse`; page text is stored
 with `===== PAGE n =====` separators so the dashboard can render page breaks.

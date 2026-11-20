@@ -94,10 +94,20 @@
     </LinearLayout>
 
     <TextView
-        android:id="@+id/timing_text"
+        android:id="@+id/asset_text"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
+        android:text="Asset: —"
+        android:textColor="#0F172A"
+        android:textSize="11sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/timing_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
         android:text="Entry: waiting"
         android:textColor="#334155"
         android:textSize="11sp"

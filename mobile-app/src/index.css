@@ -896,6 +896,10 @@ code {
   font-weight: 600;
 }
 
+.signal-cell.wide {
+  grid-column: 1 / -1;
+}
+
 .signal-reason {
   margin-top: 12px;
   padding-left: 10px;
@@ -903,6 +907,26 @@ code {
   font-size: 12.8px;
   line-height: 1.5;
   color: #334155;
+}
+
+.signal-voice {
+  margin-top: 10px;
+  font-size: 12.2px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.signal-voice span {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .placeholder {

@@ -12,24 +12,42 @@ const RESPONSE_SCHEMA = {
       enum: ['BUY', 'SELL', 'NO_TRADE'],
       description: 'Trading signal for the next candle.',
     },
-    entry_timing: {
-      type: SchemaType.STRING,
-      description: 'Either "Next Candle" or a specific local time such as "14:35".',
-    },
     confidence: {
       type: SchemaType.INTEGER,
       description: 'Confidence in the signal, 0-100.',
     },
-    timeframe_detected: {
+    entry_time: {
       type: SchemaType.STRING,
-      description: 'Detected chart timeframe, e.g. "1M", "5M", "15M".',
+      description:
+        'Exactly "Next Candle" for an immediate entry, otherwise a specific local time in 24h HH:MM format such as "14:35".',
+    },
+    asset: {
+      type: SchemaType.STRING,
+      description: 'Instrument visible in the screenshot, e.g. "EUR/USD". Use "unknown" if it is not readable.',
+    },
+    timeframe: {
+      type: SchemaType.STRING,
+      description: 'Detected chart timeframe, e.g. "1M", "5M", "15M". Use "unknown" if it is not readable.',
     },
     reason: {
       type: SchemaType.STRING,
       description: 'One short, clear technical reason for the decision.',
     },
+    voice_summary: {
+      type: SchemaType.STRING,
+      description:
+        'One natural spoken sentence for text-to-speech, e.g. "Buy signal detected with 85 percent confidence."',
+    },
   },
-  required: ['signal', 'entry_timing', 'confidence', 'timeframe_detected', 'reason'],
+  required: [
+    'signal',
+    'confidence',
+    'entry_time',
+    'asset',
+    'timeframe',
+    'reason',
+    'voice_summary',
+  ],
 };
 
 const BASE_SYSTEM_INSTRUCTION = `You are an expert intraday price-action trading assistant embedded in a floating Android overlay.
@@ -40,15 +58,34 @@ ABSOLUTE OUTPUT RULES
 2. Never reply with prose. Output only the JSON object described by the response schema.
 3. signal must be exactly one of BUY, SELL or NO_TRADE.
 4. If the chart is unclear, the timeframe is unreadable, or the knowledge base rules are not met, return NO_TRADE with a low confidence.
-5. entry_timing is "Next Candle" when the entry is immediate, otherwise a specific local time in 24h HH:MM format.
-6. confidence is an integer between 0 and 100.
-7. reason is one short technical line (max ~140 characters) naming the setup or the blocking condition.
+5. confidence must be a plain integer between 0 and 100.
+6. entry_time is exactly "Next Candle" when the entry is immediate, otherwise a specific local time in 24h HH:MM format (for example "14:35").
+7. asset is the instrument printed on the chart (for example "EUR/USD"), or "unknown" when it cannot be read.
+8. timeframe is the chart interval shown (for example "1M", "5M", "15M"), or "unknown" when it cannot be read.
+9. reason is one short technical line (max ~140 characters) naming the setup or the blocking condition.
+10. voice_summary is one natural sentence suitable for text-to-speech, naming the signal and the confidence percentage (for example "Buy signal detected with 85 percent confidence.").
+11. Emit every field every time, in the exact order defined by the schema. Never omit a field and never add extra fields.
 
 DECISION PROCESS
 - Read the visible candles, wicks, trend, support/resistance, volume if shown, and the detected timeframe.
 - Apply the global trading knowledge base below first. Where it is silent, use standard price-action and candlestick logic.
 - Do not invent indicators that are not visible in the screenshot.
 - Treat the supplied local time and timezone as the trader's clock for any timed entry.`;
+
+const SIGNAL_LABELS = { BUY: 'Buy', SELL: 'Sell', NO_TRADE: 'No-trade' };
+const CLOCK_PATTERN = /^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$/;
+
+function compact(value, maxLength) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+}
+
+function normalizeEntryTime(value) {
+  const raw = compact(value, 32);
+  if (/^next\s*candle$/i.test(raw)) return 'Next Candle';
+  const clock = CLOCK_PATTERN.exec(raw);
+  if (clock) return `${clock[1].padStart(2, '0')}:${clock[2]}`;
+  return 'Next Candle';
+}
 
 function validateAnalysis(raw) {
   if (!raw || typeof raw !== 'object') throw new Error('Model returned no JSON object');
@@ -63,16 +100,22 @@ function validateAnalysis(raw) {
     ? Math.max(0, Math.min(100, Math.round(confidenceRaw)))
     : 0;
 
-  const entryTiming = String(raw.entry_timing || '').trim();
-  const timeframe = String(raw.timeframe_detected || '').trim();
-  const reason = String(raw.reason || '').trim();
+  const entryTime = normalizeEntryTime(raw.entry_time ?? raw.entry_timing);
+  const asset = compact(raw.asset, 32) || 'unknown';
+  const timeframe = compact(raw.timeframe ?? raw.timeframe_detected, 16) || 'unknown';
+  const reason = compact(raw.reason, 240) || 'No clear setup detected.';
+  const voiceSummary =
+    compact(raw.voice_summary, 240) ||
+    `${SIGNAL_LABELS[signal]} signal detected with ${confidence} percent confidence.`;
 
   return {
     signal,
-    entry_timing: entryTiming || 'Next Candle',
     confidence,
-    timeframe_detected: timeframe || 'unknown',
-    reason: reason ? reason.slice(0, 240) : 'No clear setup detected.',
+    entry_time: entryTime,
+    asset,
+    timeframe,
+    reason,
+    voice_summary: voiceSummary,
   };
 }
 

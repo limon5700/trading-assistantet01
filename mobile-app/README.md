@@ -54,8 +54,8 @@ on every push and uploads them as artifacts. Optional signing secrets:
   `{ imageBase64, currentTime, timezone }` to `/api/analyze-chart`. The parsed
   signal updates the widget and is forwarded to the app UI.
 - `res/layout/overlay_widget.xml` — compact card: status line, colour-coded
-  signal badge (BUY green / SELL red / WAIT gray), confidence, target time and
-  timeframe.
+  signal badge (BUY green / SELL red / WAIT gray), confidence, asset, entry time
+  and timeframe.
 
 The widget colour is also applied to the card border so the signal is readable
 at a glance. Tapping "Analyze" inside the widget forces an immediate capture;

@@ -91,6 +91,7 @@ class FloatingWidgetService : Service() {
     private var dragHandle: View? = null
     private var signalBadge: TextView? = null
     private var confidenceText: TextView? = null
+    private var assetText: TextView? = null
     private var timingText: TextView? = null
     private var timeframeText: TextView? = null
     private var reasonText: TextView? = null
@@ -247,6 +248,7 @@ class FloatingWidgetService : Service() {
         dragHandle = view.findViewById(R.id.drag_handle)
         signalBadge = view.findViewById(R.id.signal_badge)
         confidenceText = view.findViewById(R.id.confidence_text)
+        assetText = view.findViewById(R.id.asset_text)
         timingText = view.findViewById(R.id.timing_text)
         timeframeText = view.findViewById(R.id.timeframe_text)
         reasonText = view.findViewById(R.id.reason_text)
@@ -354,8 +356,9 @@ class FloatingWidgetService : Service() {
             }
 
             confidenceText?.text = "${analysis.optInt("confidence", 0)}%"
-            timingText?.text = "Entry: ${analysis.optString("entry_timing", "—")}"
-            timeframeText?.text = "Timeframe: ${analysis.optString("timeframe_detected", "—")}"
+            assetText?.text = "Asset: ${analysis.optString("asset", "—")}"
+            timingText?.text = "Entry: ${analysis.optString("entry_time", "—")}"
+            timeframeText?.text = "Timeframe: ${analysis.optString("timeframe", "—")}"
             reasonText?.text = analysis.optString("reason", "")
             updateStatus("Updated ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}")
         }

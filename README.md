@@ -21,7 +21,7 @@ Android overlay ──screenshot + time + timezone──┘
                               ▼
                    Gemini 2.5 Flash (strict JSON)
                               │
-              {signal, entry_timing, confidence, timeframe_detected, reason}
+   {signal, confidence, entry_time, asset, timeframe, reason, voice_summary}
                               │
                               ▼
                Floating widget: BUY / SELL / WAIT
