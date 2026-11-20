@@ -9,7 +9,7 @@ import {
   findUserById,
   findUserByIdentifier,
   findUserByUsername,
-  getSettings,
+  getPublicSettings,
   listPlans,
   logActivity,
   mapUser,
@@ -65,7 +65,10 @@ function validateSignup(body) {
 }
 
 async function sessionPayload(user) {
-  const [settings, plans] = await Promise.all([getSettings(), listPlans({ activeOnly: true })]);
+  const [settings, plans] = await Promise.all([
+    getPublicSettings(),
+    listPlans({ activeOnly: true }),
+  ]);
   return {
     user: mapUser(user),
     settings,

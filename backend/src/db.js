@@ -200,6 +200,25 @@ const ACCOUNTS_DDL = {
       KEY idx_activity_action (action),
       CONSTRAINT fk_activity_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS crypto_payments (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id INT UNSIGNED NOT NULL,
+      plan_id INT UNSIGNED NOT NULL,
+      expected_amount_usdt DECIMAL(18, 6) NOT NULL,
+      network VARCHAR(16) NOT NULL,
+      wallet_address VARCHAR(128) NOT NULL,
+      tx_hash VARCHAR(128) NULL,
+      status ENUM('PENDING', 'VERIFIED', 'FAILED') NOT NULL DEFAULT 'PENDING',
+      verified_at DATETIME NULL,
+      created_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_crypto_tx_hash (tx_hash),
+      KEY idx_crypto_user (user_id, created_at),
+      KEY idx_crypto_status (status),
+      KEY idx_crypto_plan (plan_id),
+      CONSTRAINT fk_crypto_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+      CONSTRAINT fk_crypto_plan FOREIGN KEY (plan_id) REFERENCES plans (id) ON DELETE RESTRICT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   ],
   sqlite: [
     `CREATE TABLE IF NOT EXISTS plans (
@@ -250,6 +269,18 @@ const ACCOUNTS_DDL = {
       details TEXT NULL,
       created_at TEXT NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS crypto_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+      plan_id INTEGER NOT NULL REFERENCES plans (id) ON DELETE RESTRICT,
+      expected_amount_usdt REAL NOT NULL,
+      network TEXT NOT NULL CHECK (network IN ('BEP20', 'TRC20')),
+      wallet_address TEXT NOT NULL,
+      tx_hash TEXT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'VERIFIED', 'FAILED')),
+      verified_at TEXT NULL,
+      created_at TEXT NOT NULL
+    )`,
   ],
 };
 
@@ -289,6 +320,10 @@ const DEFAULT_SETTINGS = [
   ['support_contact_link', ''],
   ['app_name', 'AI Trading Assistant'],
   ['default_plan_type', 'FREE'],
+  ['crypto_network', 'BEP20'],
+  ['crypto_wallet_address', ''],
+  ['bscscan_api_key', ''],
+  ['trongrid_api_key', ''],
 ];
 
 /** Creates the schema when it does not exist yet. Safe to run repeatedly. */
@@ -309,6 +344,8 @@ export async function initSchema() {
   if (db.client === 'sqlite') {
     await db.exec('CREATE INDEX IF NOT EXISTS idx_activities_user ON user_activities (user_id)');
     await db.exec('CREATE INDEX IF NOT EXISTS idx_codes_assigned ON activation_codes (assigned_user_id)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_crypto_user ON crypto_payments (user_id, created_at)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_crypto_status ON crypto_payments (status)');
   }
 
   await seedDefaults(db);

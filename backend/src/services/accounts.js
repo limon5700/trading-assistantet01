@@ -3,9 +3,17 @@ import { getDb, timestamp } from '../db.js';
 
 const ACCOUNT_STATUSES = ['PENDING', 'ACTIVE', 'SUSPENDED'];
 const PLAN_TYPES = ['FREE', 'PAID'];
-const ACTIVITY_ACTIONS = ['SIGNUP', 'LOGIN', 'ACTIVATED', 'SIGNAL_SCAN', 'SETTINGS_UPDATED'];
+const ACTIVITY_ACTIONS = [
+  'SIGNUP',
+  'LOGIN',
+  'ACTIVATED',
+  'SIGNAL_SCAN',
+  'SETTINGS_UPDATED',
+  'PAYMENT_VERIFIED',
+];
+const CRYPTO_NETWORKS = ['BEP20', 'TRC20'];
 
-export { ACCOUNT_STATUSES, PLAN_TYPES, ACTIVITY_ACTIONS };
+export { ACCOUNT_STATUSES, PLAN_TYPES, ACTIVITY_ACTIONS, CRYPTO_NETWORKS };
 
 /* ----------------------------------------------------------------- users -- */
 
@@ -432,17 +440,44 @@ export async function deleteCode(id) {
 
 /* -------------------------------------------------------------- settings -- */
 
-export async function getSettings() {
+async function readSettings() {
   const db = await getDb();
   const rows = await db.all('SELECT setting_key, setting_value FROM app_settings');
   const settings = {};
   for (const row of rows) settings[row.setting_key] = row.setting_value ?? '';
+  return settings;
+}
+
+/**
+ * Settings that are safe to send to the mobile app. Explorer/RPC API keys are
+ * deliberately excluded; they never leave the server.
+ */
+export async function getPublicSettings() {
+  const settings = await readSettings();
   return {
     affiliate_link: settings.affiliate_link ?? '',
     support_contact_link: settings.support_contact_link ?? '',
     app_name: settings.app_name ?? 'AI Trading Assistant',
     default_plan_type: settings.default_plan_type ?? 'FREE',
+    crypto_network: settings.crypto_network === 'TRC20' ? 'TRC20' : 'BEP20',
+    crypto_wallet_address: settings.crypto_wallet_address ?? '',
   };
+}
+
+/** Full settings for the admin panel, including the private explorer keys. */
+export async function getAdminSettings() {
+  const settings = await readSettings();
+  return {
+    ...(await getPublicSettings()),
+    default_plan_type: settings.default_plan_type ?? 'FREE',
+    bscscan_api_key: settings.bscscan_api_key ?? '',
+    trongrid_api_key: settings.trongrid_api_key ?? '',
+  };
+}
+
+/** Backwards-compatible alias: callers that render the app use public data. */
+export function getSettings() {
+  return getPublicSettings();
 }
 
 export async function updateSettings(patch) {
@@ -464,7 +499,112 @@ export async function updateSettings(patch) {
       ]);
     }
   }
-  return getSettings();
+  return getAdminSettings();
+}
+
+/* -------------------------------------------------------- crypto payments -- */
+
+export function mapPayment(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    user_id: Number(row.user_id),
+    plan_id: Number(row.plan_id),
+    plan_name: row.plan_name ?? null,
+    expected_amount_usdt: Number(row.expected_amount_usdt) || 0,
+    network: row.network,
+    wallet_address: row.wallet_address,
+    tx_hash: row.tx_hash ?? null,
+    status: row.status,
+    verified_at: row.verified_at ?? null,
+    created_at: row.created_at,
+  };
+}
+
+const PAYMENT_SELECT = `
+  SELECT c.*, p.name AS plan_name
+  FROM crypto_payments c
+  LEFT JOIN plans p ON p.id = c.plan_id
+`;
+
+export async function findPaymentById(id) {
+  const db = await getDb();
+  const row = await db.get(`${PAYMENT_SELECT} WHERE c.id = ?`, [Number(id)]);
+  return row ? mapPayment(row) : null;
+}
+
+export async function findPaymentForUser(id, userId) {
+  const db = await getDb();
+  const row = await db.get(`${PAYMENT_SELECT} WHERE c.id = ? AND c.user_id = ?`, [
+    Number(id),
+    Number(userId),
+  ]);
+  return row ? mapPayment(row) : null;
+}
+
+export async function findPaymentByTxHash(txHash) {
+  const db = await getDb();
+  const row = await db.get(`${PAYMENT_SELECT} WHERE LOWER(c.tx_hash) = ?`, [
+    String(txHash).trim().toLowerCase(),
+  ]);
+  return row ? mapPayment(row) : null;
+}
+
+export async function findPendingPayment({ userId, planId }) {
+  const db = await getDb();
+  const row = await db.get(
+    `${PAYMENT_SELECT} WHERE c.user_id = ? AND c.plan_id = ? AND c.status = 'PENDING'
+     ORDER BY c.id DESC LIMIT 1`,
+    [Number(userId), Number(planId)],
+  );
+  return row ? mapPayment(row) : null;
+}
+
+export async function createCryptoPayment({
+  userId,
+  planId,
+  expectedAmount,
+  network,
+  walletAddress,
+}) {
+  const db = await getDb();
+  const result = await db.run(
+    `INSERT INTO crypto_payments
+      (user_id, plan_id, expected_amount_usdt, network, wallet_address, tx_hash, status, verified_at, created_at)
+     VALUES (?, ?, ?, ?, ?, NULL, 'PENDING', NULL, ?)`,
+    [Number(userId), Number(planId), expectedAmount, network, walletAddress, timestamp()],
+  );
+  return findPaymentById(result.insertId);
+}
+
+export async function attachPaymentTxHash(id, txHash) {
+  const db = await getDb();
+  await db.run('UPDATE crypto_payments SET tx_hash = ? WHERE id = ?', [
+    String(txHash).trim(),
+    Number(id),
+  ]);
+  return findPaymentById(id);
+}
+
+export async function setPaymentStatus(id, status) {
+  const db = await getDb();
+  const verifiedAt = status === 'VERIFIED' ? timestamp() : null;
+  await db.run('UPDATE crypto_payments SET status = ?, verified_at = ? WHERE id = ?', [
+    status,
+    verifiedAt,
+    Number(id),
+  ]);
+  return findPaymentById(id);
+}
+
+/** Activates an account on a paid plan without consuming an activation code. */
+export async function activateUserOnPlan({ userId, planId }) {
+  const db = await getDb();
+  await db.run(
+    `UPDATE users SET account_status = 'ACTIVE', active_plan_id = ? WHERE id = ?`,
+    [Number(planId), Number(userId)],
+  );
+  return findUserById(userId);
 }
 
 /* ------------------------------------------------------------ activities -- */

@@ -77,6 +77,28 @@ check "admin settings get" 200 "$(code "$B/api/admin/settings" -H "Authorization
 check "admin settings put" 200 "$(code -X PUT "$B/api/admin/settings" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"affiliate_link":"https://broker.example.com/ref/123","support_contact_link":"https://t.me/support"}')"
 check "settings saved" "https://t.me/support" "$(field "d['settings']['support_contact_link']")"
 check "invalid affiliate url rejected" 400 "$(code -X PUT "$B/api/admin/settings" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"affiliate_link":"not-a-url"}')"
+check "invalid crypto network rejected" 400 "$(code -X PUT "$B/api/admin/settings" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"crypto_network":"ERC20"}')"
+check "invalid crypto wallet rejected" 400 "$(code -X PUT "$B/api/admin/settings" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"crypto_network":"BEP20","crypto_wallet_address":"0x1234"}')"
+check "crypto settings saved" 200 "$(code -X PUT "$B/api/admin/settings" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"crypto_network":"BEP20","crypto_wallet_address":"0x1111111111111111111111111111111111111111","bscscan_api_key":"smoke-explorer-key"}')"
+check "crypto wallet stored" "0x1111111111111111111111111111111111111111" "$(field "d['settings']['crypto_wallet_address']")"
+
+# --- crypto payments ----------------------------------------------------
+code "$B/api/auth/me" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
+check "public settings hide explorer key" "no" "$(field "'yes' if 'bscscan_api_key' in d['settings'] else 'no'")"
+check "public settings expose wallet" "0x1111111111111111111111111111111111111111" "$(field "d['settings']['crypto_wallet_address']")"
+check "create crypto payment" 201 "$(code -X POST "$B/api/payments/start" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d "{\"plan_id\":$PLAN_ID}")"
+PAYMENT_ID=$(field "d['payment']['id']")
+check "payment amount" 29 "$(field "d['payment']['expected_amount_usdt']")"
+check "payment network" BEP20 "$(field "d['payment']['network']")"
+check "payment pending" PENDING "$(field "d['payment']['status']")"
+check "payment fetch" 200 "$(code "$B/api/payments/$PAYMENT_ID" -H "Authorization: Bearer $USER_TOKEN")"
+check "payment owner id" "$USER_ID" "$(field "d['payment']['user_id']")"
+check "verify requires tx hash" 400 "$(code -X POST "$B/api/payments/verify-crypto" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d "{\"payment_id\":$PAYMENT_ID}")"
+check "malformed tx hash rejected" 400 "$(code -X POST "$B/api/payments/verify-crypto" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d "{\"payment_id\":$PAYMENT_ID,\"tx_hash\":\"0xdeadbeef\"}")"
+curl -s -o /tmp/body.json "$B/api/payments/$PAYMENT_ID" -H "Authorization: Bearer $USER_TOKEN"
+check "payment still pending" PENDING "$(field "d['payment']['status']")"
+check "unknown payment 404" 404 "$(code "$B/api/payments/99999" -H "Authorization: Bearer $USER_TOKEN")"
+check "payments require auth" 401 "$(code -X POST "$B/api/payments/start" -H 'Content-Type: application/json' -d '{"plan_id":1}')"
 
 check "generate code" 201 "$(code -X POST "$B/api/admin/activation-codes/generate" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d "{\"user_id\":$USER_ID,\"plan_id\":$PLAN_ID,\"expires_in_days\":7}")"
 ACT_CODE=$(field "d['item']['code']")

@@ -1,13 +1,6 @@
 import { useState, type FormEvent, type InputHTMLAttributes } from 'react';
 import { ApiError } from '../lib/api';
 import { useSession } from '../lib/session';
-import {
-  DEFAULT_SERVER_URL,
-  isValidServerUrl,
-  loadServerUrl,
-  normalizeServerUrl,
-  saveServerUrl,
-} from '../lib/settings';
 
 type Tab = 'login' | 'signup';
 
@@ -27,9 +20,6 @@ export function AuthScreen() {
   const [signupForm, setSignupForm] = useState(EMPTY_SIGNUP);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [serverOpen, setServerOpen] = useState(false);
-  const [serverDraft, setServerDraft] = useState(() => loadServerUrl());
-  const [serverFlash, setServerFlash] = useState(false);
 
   function switchTab(next: Tab) {
     setTab(next);
@@ -93,19 +83,6 @@ export function AuthScreen() {
     } finally {
       setBusy(false);
     }
-  }
-
-  function handleSaveServer() {
-    const next = normalizeServerUrl(serverDraft);
-    if (!isValidServerUrl(next)) {
-      setError('Enter a valid http(s) server URL.');
-      return;
-    }
-    saveServerUrl(next);
-    setServerDraft(next);
-    setServerFlash(true);
-    setError(null);
-    window.setTimeout(() => setServerFlash(false), 2000);
   }
 
   const field = (id: string, label: string, props: InputHTMLAttributes<HTMLInputElement>) => (
@@ -243,40 +220,6 @@ export function AuthScreen() {
           </button>
         </form>
 
-        <button
-          type="button"
-          className="link-btn"
-          onClick={() => setServerOpen((open) => !open)}
-          aria-expanded={serverOpen}
-        >
-          {serverOpen ? 'Hide server settings' : 'Server settings'}
-        </button>
-
-        {serverOpen ? (
-          <div className="server-box">
-            <label className="field-label" htmlFor="auth-server-url">
-              Backend server URL
-            </label>
-            <div className="row">
-              <input
-                id="auth-server-url"
-                className="input"
-                inputMode="url"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                placeholder={DEFAULT_SERVER_URL}
-                value={serverDraft}
-                onChange={(event) => setServerDraft(event.target.value)}
-                disabled={busy}
-              />
-              <button type="button" className="btn" onClick={handleSaveServer} disabled={busy}>
-                Save
-              </button>
-            </div>
-            {serverFlash ? <p className="saved-flash">Saved.</p> : null}
-          </div>
-        ) : null}
       </div>
 
       <p className="footer-note">

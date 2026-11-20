@@ -11,9 +11,17 @@ const ACTION_STYLES: Record<ActivityAction, string> = {
   ACTIVATED: 'border-emerald-200 bg-emerald-50 text-emerald-700',
   SIGNAL_SCAN: 'border-violet-200 bg-violet-50 text-violet-700',
   SETTINGS_UPDATED: 'border-amber-200 bg-amber-50 text-amber-700',
+  PAYMENT_VERIFIED: 'border-teal-200 bg-teal-50 text-teal-700',
 };
 
-const ACTIONS: ActivityAction[] = ['SIGNUP', 'LOGIN', 'ACTIVATED', 'SIGNAL_SCAN', 'SETTINGS_UPDATED'];
+const ACTIONS: ActivityAction[] = [
+  'SIGNUP',
+  'LOGIN',
+  'ACTIVATED',
+  'SIGNAL_SCAN',
+  'SETTINGS_UPDATED',
+  'PAYMENT_VERIFIED',
+];
 
 function formatDateTime(value: string | null): string {
   if (!value) return '—';

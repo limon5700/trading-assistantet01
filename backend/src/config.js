@@ -74,4 +74,10 @@ export const config = {
     maxBytes: int('MAX_UPLOAD_MB', 25) * 1024 * 1024,
     maxMb: int('MAX_UPLOAD_MB', 25),
   },
+  crypto: {
+    // Optional overrides; the admin panel can also store explorer keys.
+    bscRpcUrl: (process.env.BSC_RPC_URL || '').trim(),
+    bscscanApiKey: (process.env.BSCSCAN_API_KEY || '').trim(),
+    trongridApiKey: (process.env.TRONGRID_API_KEY || '').trim(),
+  },
 };

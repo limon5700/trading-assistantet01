@@ -60,7 +60,12 @@ Then `npm run migrate`, which creates the `knowledge_base` table automatically
 | GET  | `/api/admin/knowledge/:id` | admin | Full entry with extracted text |
 | PUT  | `/api/admin/knowledge/:id` | admin | `{ title?, content?, is_active? }` |
 | DELETE | `/api/admin/knowledge/:id` | admin | Delete an entry |
-| POST | `/api/analyze-chart` | – (rate limited) | `{ imageBase64, currentTime, timezone }` |
+| GET  | `/api/admin/settings` | admin | App + crypto settings (explorer keys included) |
+| PUT  | `/api/admin/settings` | admin | Update links, `crypto_network`, `crypto_wallet_address`, explorer keys |
+| POST | `/api/payments/start` | user JWT | `{ plan_id }` → creates/reuses a PENDING `crypto_payments` row |
+| GET  | `/api/payments/:id` | user JWT | Payment status (owner only) |
+| POST | `/api/payments/verify-crypto` | user JWT | `{ payment_id, tx_hash }` → verifies on-chain and activates |
+| POST | `/api/analyze-chart` | user JWT + ACTIVE | `{ imageBase64, currentTime, timezone }` or multipart `image` |
 
 `/api/analyze-chart` responds with exactly this strictly validated object —
 Gemini Vision is called with a JSON response schema, so every field is always
@@ -88,6 +93,30 @@ present and no prose or extra keys can leak through:
 
 Uploaded PDFs are parsed page by page with `pdf-parse`; page text is stored
 with `===== PAGE n =====` separators so the dashboard can render page breaks.
+
+## Crypto (USDT) payments
+
+The admin sets `crypto_network` (`BEP20` or `TRC20`), `crypto_wallet_address`
+and optional `BSCSCAN_API_KEY` / `TRONGRID_API_KEY` on the dashboard Settings
+page (the env vars with the same names are fallbacks). `/api/payments/start`
+snapshots the price, network and wallet into `crypto_payments` with status
+`PENDING`.
+
+`/api/payments/verify-crypto` then checks:
+
+1. the transaction succeeded on-chain (BSC receipt status `0x1`, TRON
+   `contractRet: SUCCESS`);
+2. the hash has not been used by another payment (`tx_hash` is unique);
+3. a USDT `Transfer` to the configured wallet exists in the receipt/logs
+   (BEP20 contract `0x55d3…7955`, TRC20 `TR7N…Lj6t`);
+4. the transferred amount is at least `expected_amount_usdt`.
+
+BEP20 is read over public BSC JSON-RPC (with BscScan as a key-backed fallback);
+TRC20 uses TronGrid and falls back to TronScan. On success the row becomes
+`VERIFIED`, the user is set to `ACTIVE` on the plan, a `PAYMENT_VERIFIED`
+activity is logged, and the app returns the fresh session so the hub unlocks.
+Unconfirmed transactions stay `PENDING` for the app's polling; mismatches are
+marked `FAILED`.
 
 ## Deployment
 

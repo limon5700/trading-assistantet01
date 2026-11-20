@@ -1,40 +1,25 @@
-const STORAGE_KEY = 'ai_trading_server_url';
-
 /**
- * Cloud backend that ships with the app. Override at build time with
- * `VITE_DEFAULT_SERVER_URL` (see `.env.example`), e.g. when you host the API on
- * your own domain.
+ * The backend base URL is baked into the build from `VITE_API_BASE_URL`
+ * (see `.env` / `.env.example`). It is intentionally not editable in the app,
+ * so users can never point the widget at another server.
+ *
+ * An empty value means "same origin", which is useful for web previews that
+ * proxy `/api` to the backend. The Android overlay requires an absolute URL.
  */
-export const DEFAULT_SERVER_URL =
-  (import.meta.env.VITE_DEFAULT_SERVER_URL as string | undefined)?.replace(/\/+$/, '') ||
-  'https://ai-trading-api.onrender.com';
+export const API_BASE_URL = (
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ''
+)
+  .trim()
+  .replace(/\/+$/, '');
 
-export function normalizeServerUrl(value: string): string {
-  return value.trim().replace(/\/+$/, '');
-}
+export const APP_VERSION = (import.meta.env.VITE_APP_VERSION as string | undefined) || '1.0.1';
 
-export function isValidServerUrl(value: string): boolean {
+export function isConfiguredServerUrl(): boolean {
+  if (!API_BASE_URL) return false;
   try {
-    const url = new URL(normalizeServerUrl(value));
+    const url = new URL(API_BASE_URL);
     return url.protocol === 'https:' || url.protocol === 'http:';
   } catch {
     return false;
-  }
-}
-
-export function loadServerUrl(): string {
-  try {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    return stored ? normalizeServerUrl(stored) : DEFAULT_SERVER_URL;
-  } catch {
-    return DEFAULT_SERVER_URL;
-  }
-}
-
-export function saveServerUrl(value: string): void {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, normalizeServerUrl(value));
-  } catch {
-    // Storage can be unavailable in private browsing; the in-memory value still works.
   }
 }

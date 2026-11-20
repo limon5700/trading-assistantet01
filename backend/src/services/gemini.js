@@ -127,58 +127,168 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** Vision-capable models that can be tried if the configured one is missing. */
+const FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+
+function analysisError(message, status, code) {
+  return Object.assign(new Error(message), { status, code });
+}
+
+/**
+ * Turns an SDK error into an actionable API error. `retryModel` is true when a
+ * different Gemini model might succeed (missing/unsupported model or an
+ * overloaded service), and false for quota, key or safety failures.
+ */
+function describeGeminiError(error) {
+  if (error?.status && error?.code) return { error, retryModel: false };
+
+  const message = String(error?.message || error || 'Unknown Gemini error');
+  const details = JSON.stringify(error?.errorDetails ?? error?.response?.data ?? '');
+  const haystack = `${message} ${details}`.toLowerCase();
+
+  if (haystack.includes('api key not valid') || haystack.includes('api_key_invalid')) {
+    return {
+      error: analysisError(
+        'The Gemini API key is invalid. Update GEMINI_API_KEY on the server.',
+        502,
+        'GEMINI_KEY_INVALID',
+      ),
+      retryModel: false,
+    };
+  }
+  if (
+    haystack.includes('permission_denied') ||
+    haystack.includes('permission denied') ||
+    haystack.includes('api has not been used')
+  ) {
+    return {
+      error: analysisError(
+        'Gemini rejected the API key for this project. Check the key and that the Generative Language API is enabled.',
+        502,
+        'GEMINI_PERMISSION_DENIED',
+      ),
+      retryModel: false,
+    };
+  }
+  if (
+    haystack.includes('429') ||
+    haystack.includes('quota') ||
+    haystack.includes('resource_exhausted') ||
+    haystack.includes('rate limit')
+  ) {
+    return {
+      error: analysisError(
+        'Gemini API quota or rate limit reached. Wait a moment or raise the quota, then try again.',
+        503,
+        'GEMINI_QUOTA_EXCEEDED',
+      ),
+      retryModel: false,
+    };
+  }
+  if (haystack.includes('safety') || haystack.includes('blocked')) {
+    return {
+      error: analysisError(
+        'Gemini blocked this screenshot (safety filter). Capture the chart again without private content.',
+        422,
+        'GEMINI_BLOCKED',
+      ),
+      retryModel: false,
+    };
+  }
+  if (
+    haystack.includes('404') ||
+    haystack.includes('not found') ||
+    haystack.includes('not supported') ||
+    haystack.includes('unsupported') ||
+    haystack.includes('503') ||
+    haystack.includes('unavailable') ||
+    haystack.includes('overloaded') ||
+    haystack.includes('non-json') ||
+    haystack.includes('invalid signal')
+  ) {
+    return { error, retryModel: true };
+  }
+
+  return { error, retryModel: false };
+}
+
+function parseModelJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Defensive parse: strip fences if the model still wrapped the JSON.
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('Model returned a non-JSON response');
+    return JSON.parse(match[0]);
+  }
+}
+
 /**
  * Runs the vision analysis against the active knowledge base and returns the
- * strictly validated structured signal.
+ * strictly validated structured signal. Falls back to another vision model
+ * when the configured one is retired or temporarily unavailable.
  */
 export async function analyzeChart({ imageBase64, mimeType, currentTime, timezone }) {
   const activeEntries = await getActiveKnowledge();
   const knowledgeBlock = buildKnowledgePrompt(activeEntries);
 
-  const model = genAI.getGenerativeModel({
-    model: config.gemini.model,
-    systemInstruction: `${BASE_SYSTEM_INSTRUCTION}\n\nGLOBAL TRADING KNOWLEDGE BASE (authoritative, ${activeEntries.length} active entries):\n${knowledgeBlock}`,
-    generationConfig: {
-      temperature: 0.2,
-      topP: 0.9,
-      maxOutputTokens: 2048,
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
-    },
-  });
+  const models = [...new Set([config.gemini.model, ...FALLBACK_MODELS].filter(Boolean))];
+  let lastError = null;
 
-  const result = await withTimeout(
-    model.generateContent([
-      {
-        inlineData: {
-          mimeType,
-          data: imageBase64,
-        },
+  for (const modelName of models) {
+    const model = genAI.getGenerativeModel({
+      model: modelName,
+      systemInstruction: `${BASE_SYSTEM_INSTRUCTION}\n\nGLOBAL TRADING KNOWLEDGE BASE (authoritative, ${activeEntries.length} active entries):\n${knowledgeBlock}`,
+      generationConfig: {
+        temperature: 0.2,
+        topP: 0.9,
+        maxOutputTokens: 2048,
+        responseMimeType: 'application/json',
+        responseSchema: RESPONSE_SCHEMA,
       },
-      {
-        text: `Analyse this chart screenshot.
+    });
+
+    try {
+      const result = await withTimeout(
+        model.generateContent([
+          {
+            inlineData: {
+              mimeType,
+              data: imageBase64,
+            },
+          },
+          {
+            text: `Analyse this chart screenshot.
 Trader local time: ${currentTime || 'unknown'}
 Trader timezone: ${timezone || 'unknown'}
 
 Return the JSON decision now.`,
-      },
-    ]),
-    config.gemini.timeoutMs,
-  );
+          },
+        ]),
+        config.gemini.timeoutMs,
+      );
 
-  const text = result.response.text();
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // Defensive parse: strip fences if the model still wrapped the JSON.
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('Model returned a non-JSON response');
-    parsed = JSON.parse(match[0]);
+      const parsed = parseModelJson(result.response.text());
+      return {
+        analysis: validateAnalysis(parsed),
+        knowledgeEntriesUsed: activeEntries.length,
+        model: modelName,
+      };
+    } catch (error) {
+      const { error: mapped, retryModel } = describeGeminiError(error);
+      lastError = mapped;
+      if (String(mapped.message).includes('timed out')) throw mapped;
+      if (!retryModel) throw mapped;
+      console.warn(`[gemini] ${modelName} failed, trying the next model: ${mapped.message}`);
+    }
   }
 
-  return {
-    analysis: validateAnalysis(parsed),
-    knowledgeEntriesUsed: activeEntries.length,
-  };
+  throw (
+    lastError ||
+    analysisError(
+      'No Gemini vision model is available. Check GEMINI_MODEL and the API key.',
+      502,
+      'GEMINI_MODEL_UNAVAILABLE',
+    )
+  );
 }

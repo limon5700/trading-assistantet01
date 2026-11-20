@@ -89,9 +89,19 @@ export interface AppSettings {
   support_contact_link: string;
   app_name: string;
   default_plan_type: string;
+  crypto_network: 'BEP20' | 'TRC20';
+  crypto_wallet_address: string;
+  bscscan_api_key: string;
+  trongrid_api_key: string;
 }
 
-export type ActivityAction = 'SIGNUP' | 'LOGIN' | 'ACTIVATED' | 'SIGNAL_SCAN' | 'SETTINGS_UPDATED';
+export type ActivityAction =
+  | 'SIGNUP'
+  | 'LOGIN'
+  | 'ACTIVATED'
+  | 'SIGNAL_SCAN'
+  | 'SETTINGS_UPDATED'
+  | 'PAYMENT_VERIFIED';
 
 export interface Activity {
   id: number;

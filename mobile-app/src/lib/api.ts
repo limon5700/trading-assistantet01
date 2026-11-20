@@ -1,4 +1,4 @@
-import { loadServerUrl } from './settings';
+import { API_BASE_URL } from './settings';
 
 export type AccountStatus = 'PENDING' | 'ACTIVE' | 'SUSPENDED';
 
@@ -33,6 +33,34 @@ export interface AppSettings {
   support_contact_link: string;
   app_name?: string;
   default_plan_type?: string;
+  crypto_network?: 'BEP20' | 'TRC20';
+  crypto_wallet_address?: string;
+}
+
+export type PaymentStatus = 'PENDING' | 'VERIFIED' | 'FAILED';
+
+export interface CryptoPayment {
+  id: number;
+  user_id: number;
+  plan_id: number;
+  plan_name: string | null;
+  expected_amount_usdt: number;
+  network: 'BEP20' | 'TRC20';
+  wallet_address: string;
+  tx_hash: string | null;
+  status: PaymentStatus;
+  verified_at: string | null;
+  created_at: string;
+}
+
+export interface PaymentIntentResponse {
+  payment: CryptoPayment;
+  plan: Plan;
+}
+
+export interface PaymentVerificationResponse extends SessionPayload {
+  verified: boolean;
+  payment: CryptoPayment;
 }
 
 export interface SessionPayload {
@@ -73,7 +101,7 @@ interface RequestOptions {
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const base = loadServerUrl();
+  const base = API_BASE_URL;
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
@@ -86,7 +114,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
   } catch {
-    throw new ApiError('Cannot reach the server. Check your connection and the server URL.', 0);
+    throw new ApiError('Cannot reach the server. Check your internet connection.', 0);
   }
 
   const text = await response.text();
@@ -132,6 +160,28 @@ export const userApi = {
       method: 'POST',
       token,
       body: { activation_code: activationCode },
+    });
+  },
+};
+
+export const paymentApi = {
+  start(token: string, planId: number): Promise<PaymentIntentResponse> {
+    return request<PaymentIntentResponse>('/api/payments/start', {
+      method: 'POST',
+      token,
+      body: { plan_id: planId },
+    });
+  },
+
+  get(token: string, paymentId: number): Promise<{ payment: CryptoPayment }> {
+    return request<{ payment: CryptoPayment }>(`/api/payments/${paymentId}`, { token });
+  },
+
+  verify(token: string, paymentId: number, txHash: string): Promise<PaymentVerificationResponse> {
+    return request<PaymentVerificationResponse>('/api/payments/verify-crypto', {
+      method: 'POST',
+      token,
+      body: { payment_id: paymentId, tx_hash: txHash.trim() },
     });
   },
 };

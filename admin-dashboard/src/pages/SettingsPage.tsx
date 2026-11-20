@@ -4,9 +4,31 @@ import { useToast } from '../components/ToastProvider';
 import { ApiError, api } from '../lib/api';
 import type { AppSettings } from '../lib/types';
 
-type FormState = Pick<AppSettings, 'affiliate_link' | 'support_contact_link' | 'app_name'>;
+type CryptoNetwork = 'BEP20' | 'TRC20';
 
-const EMPTY: FormState = { affiliate_link: '', support_contact_link: '', app_name: '' };
+type FormState = Pick<
+  AppSettings,
+  | 'affiliate_link'
+  | 'support_contact_link'
+  | 'app_name'
+  | 'crypto_network'
+  | 'crypto_wallet_address'
+  | 'bscscan_api_key'
+  | 'trongrid_api_key'
+>;
+
+const EMPTY: FormState = {
+  affiliate_link: '',
+  support_contact_link: '',
+  app_name: '',
+  crypto_network: 'BEP20',
+  crypto_wallet_address: '',
+  bscscan_api_key: '',
+  trongrid_api_key: '',
+};
+
+const BEP20_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
+const TRC20_ADDRESS = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 
 function isHttpUrl(value: string): boolean {
   try {
@@ -15,6 +37,10 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function walletMatches(network: CryptoNetwork, wallet: string): boolean {
+  return network === 'BEP20' ? BEP20_ADDRESS.test(wallet) : TRC20_ADDRESS.test(wallet);
 }
 
 export default function SettingsPage() {
@@ -33,6 +59,10 @@ export default function SettingsPage() {
         affiliate_link: settings.affiliate_link ?? '',
         support_contact_link: settings.support_contact_link ?? '',
         app_name: settings.app_name ?? '',
+        crypto_network: settings.crypto_network === 'TRC20' ? 'TRC20' : 'BEP20',
+        crypto_wallet_address: settings.crypto_wallet_address ?? '',
+        bscscan_api_key: settings.bscscan_api_key ?? '',
+        trongrid_api_key: settings.trongrid_api_key ?? '',
       });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load settings.');
@@ -52,6 +82,9 @@ export default function SettingsPage() {
     const affiliate = form.affiliate_link.trim();
     const support = form.support_contact_link.trim();
     const appName = form.app_name.trim();
+    const wallet = form.crypto_wallet_address.trim();
+    const bscscanKey = form.bscscan_api_key.trim();
+    const trongridKey = form.trongrid_api_key.trim();
 
     if (affiliate && !isHttpUrl(affiliate)) {
       setError('The affiliate link must start with http:// or https://.');
@@ -65,6 +98,18 @@ export default function SettingsPage() {
       setError('App name is required.');
       return;
     }
+    if (wallet && !walletMatches(form.crypto_network, wallet)) {
+      setError(
+        form.crypto_network === 'BEP20'
+          ? 'Enter a BSC (BEP20) wallet address starting with 0x.'
+          : 'Enter a TRON (TRC20) wallet address starting with T.',
+      );
+      return;
+    }
+    if (bscscanKey.length > 200 || trongridKey.length > 200) {
+      setError('Explorer API keys must be 200 characters or fewer.');
+      return;
+    }
 
     setSaving(true);
     setError(null);
@@ -73,11 +118,19 @@ export default function SettingsPage() {
         affiliate_link: affiliate,
         support_contact_link: support,
         app_name: appName,
+        crypto_network: form.crypto_network,
+        crypto_wallet_address: wallet,
+        bscscan_api_key: bscscanKey,
+        trongrid_api_key: trongridKey,
       });
       setForm({
         affiliate_link: settings.affiliate_link,
         support_contact_link: settings.support_contact_link,
         app_name: settings.app_name,
+        crypto_network: settings.crypto_network === 'TRC20' ? 'TRC20' : 'BEP20',
+        crypto_wallet_address: settings.crypto_wallet_address,
+        bscscan_api_key: settings.bscscan_api_key,
+        trongrid_api_key: settings.trongrid_api_key,
       });
       toast.success('Settings saved.');
     } catch (err) {
@@ -146,8 +199,116 @@ export default function SettingsPage() {
                 placeholder="https://t.me/your_support"
               />
               <p className="mt-1 text-xs text-slate-500">
-                Telegram, WhatsApp or any support URL. Used by both the Free and Paid plan buttons.
+                Telegram, WhatsApp or any support URL. Used by the Free affiliate step.
               </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">Crypto payments (USDT)</h2>
+                  <p className="text-xs text-slate-500">
+                    Paid plans are verified on-chain against this wallet.
+                  </p>
+                </div>
+                <span
+                  className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
+                    form.crypto_wallet_address
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-amber-200 bg-amber-50 text-amber-700'
+                  }`}
+                >
+                  {form.crypto_wallet_address ? 'Payments enabled' : 'Wallet not set'}
+                </span>
+              </div>
+
+              <div className="mt-4 space-y-4">
+                <div>
+                  <label className="label" htmlFor="crypto-network">
+                    Network
+                  </label>
+                  <select
+                    id="crypto-network"
+                    className="input"
+                    value={form.crypto_network}
+                    onChange={(event) =>
+                      setForm({ ...form, crypto_network: event.target.value as CryptoNetwork })
+                    }
+                  >
+                    <option value="BEP20">BEP20 — BNB Smart Chain (BSC)</option>
+                    <option value="TRC20">TRC20 — TRON</option>
+                  </select>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {form.crypto_network === 'BEP20'
+                      ? 'USDT contract 0x55d398326f99059fF775485246999027B3197955 (BSC, 18 decimals).'
+                      : 'USDT contract TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t (TRON, 6 decimals).'}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="label" htmlFor="crypto-wallet">
+                    Receiving wallet address
+                  </label>
+                  <input
+                    id="crypto-wallet"
+                    className="input font-mono text-xs"
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    value={form.crypto_wallet_address}
+                    onChange={(event) =>
+                      setForm({ ...form, crypto_wallet_address: event.target.value })
+                    }
+                    placeholder={
+                      form.crypto_network === 'BEP20'
+                        ? '0x… (BSC address)'
+                        : 'T… (TRON address)'
+                    }
+                  />
+                  <p className="mt-1 text-xs text-slate-500">
+                    Leave empty to disable crypto checkout. Users must pay the exact plan amount in
+                    USDT to this address.
+                  </p>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="label" htmlFor="bscscan-key">
+                      BscScan API key (optional)
+                    </label>
+                    <input
+                      id="bscscan-key"
+                      className="input font-mono text-xs"
+                      type="password"
+                      autoComplete="off"
+                      value={form.bscscan_api_key}
+                      onChange={(event) =>
+                        setForm({ ...form, bscscan_api_key: event.target.value })
+                      }
+                      placeholder="Used when BSC RPC is unavailable"
+                    />
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="trongrid-key">
+                      TronGrid API key (optional)
+                    </label>
+                    <input
+                      id="trongrid-key"
+                      className="input font-mono text-xs"
+                      type="password"
+                      autoComplete="off"
+                      value={form.trongrid_api_key}
+                      onChange={(event) =>
+                        setForm({ ...form, trongrid_api_key: event.target.value })
+                      }
+                      placeholder="Raises TRON API limits"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Explorer keys are stored server-side and are never sent to the mobile app.
+                </p>
+              </div>
             </div>
 
             {error ? (
@@ -171,9 +332,16 @@ export default function SettingsPage() {
           <h2 className="text-sm font-semibold text-slate-900">Activation flow</h2>
           <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-slate-600">
             <li>User signs up in the app and stays PENDING.</li>
-            <li>They open your affiliate link and send proof to support, or pay for the paid plan.</li>
-            <li>Generate an activation code for that user from the Codes page.</li>
-            <li>They enter the code in the app, which activates the account on that plan.</li>
+            <li>
+              <strong>Free plan:</strong> they open your affiliate link, contact support, and you
+              generate an activation code from the Codes page.
+            </li>
+            <li>
+              <strong>Paid plan:</strong> they send the exact USDT amount shown in the app and submit
+              the TxID. The backend verifies the transfer on-chain and activates the account
+              automatically — no code needed.
+            </li>
+            <li>They enter the code (free flow) or finish the payment (paid flow) to unlock the hub.</li>
           </ol>
         </section>
       </div>

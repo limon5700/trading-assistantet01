@@ -9,6 +9,7 @@ import {
 } from 'react';
 import {
   ApiError,
+  paymentApi,
   userApi,
   type AppSettings,
   type AuthUser,
@@ -44,6 +45,7 @@ interface SessionValue {
   login: (identifier: string, password: string) => Promise<void>;
   signup: (input: SignupInput) => Promise<void>;
   activate: (code: string) => Promise<void>;
+  verifyPayment: (paymentId: number, txHash: string) => Promise<void>;
   refresh: () => Promise<void>;
   logout: () => void;
 }
@@ -139,6 +141,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [applySession, token],
   );
 
+  const verifyPayment = useCallback(
+    async (paymentId: number, txHash: string) => {
+      if (!token) throw new ApiError('Please sign in again', 401);
+      applySession(await paymentApi.verify(token, paymentId, txHash));
+    },
+    [applySession, token],
+  );
+
   const refresh = useCallback(async () => {
     if (!token) return;
     try {
@@ -154,8 +164,32 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [clearSession]);
 
   const value = useMemo<SessionValue>(
-    () => ({ booting, token, user, plans, settings, login, signup, activate, refresh, logout }),
-    [booting, token, user, plans, settings, login, signup, activate, refresh, logout],
+    () => ({
+      booting,
+      token,
+      user,
+      plans,
+      settings,
+      login,
+      signup,
+      activate,
+      verifyPayment,
+      refresh,
+      logout,
+    }),
+    [
+      booting,
+      token,
+      user,
+      plans,
+      settings,
+      login,
+      signup,
+      activate,
+      verifyPayment,
+      refresh,
+      logout,
+    ],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

@@ -8,6 +8,7 @@ import userAuthRoutes from './routes/userAuth.js';
 import adminRoutes from './routes/admin.js';
 import knowledgeRoutes from './routes/knowledge.js';
 import analyzeRoutes from './routes/analyze.js';
+import paymentRoutes from './routes/payments.js';
 
 export function createApp() {
   const app = express();
@@ -29,7 +30,9 @@ export function createApp() {
       allowedHeaders: ['Content-Type', 'Authorization'],
     }),
   );
-  app.use(express.json({ limit: `${config.uploads.maxMb}mb` }));
+  // Chart screenshots arrive as base64 JSON, so the JSON body needs more room
+  // than the default. PDF uploads have their own multer limit.
+  app.use(express.json({ limit: '15mb' }));
   app.use(express.urlencoded({ extended: false, limit: '1mb' }));
   app.use(cookieParser());
 
@@ -45,6 +48,9 @@ export function createApp() {
   app.use('/api/admin/knowledge', requireAdmin, knowledgeRoutes);
   app.use('/api/admin', requireAdmin, adminRoutes);
 
+  // Crypto (USDT) payment intents and on-chain verification.
+  app.use('/api/payments', paymentRoutes);
+
   // Chart analysis requires a signed-in, activated app user.
   app.use('/api', analyzeRoutes);
 
@@ -58,7 +64,9 @@ export function createApp() {
     const message =
       error.code === 'LIMIT_FILE_SIZE'
         ? `File is too large (max ${config.uploads.maxMb} MB)`
-        : error.message || 'Internal server error';
+        : error.type === 'entity.too.large'
+          ? 'The screenshot payload is too large. Send a smaller JPEG (max 15 MB).'
+          : error.message || 'Internal server error';
 
     if (status >= 500) {
       console.error('[error]', error);

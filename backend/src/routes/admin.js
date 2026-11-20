@@ -10,8 +10,8 @@ import {
   deleteUser,
   findUserById,
   generateActivationCode,
+  getAdminSettings,
   getPlan,
-  getSettings,
   listActivities,
   listCodes,
   listPlans,
@@ -21,10 +21,18 @@ import {
   updateUserStatus,
 } from '../services/accounts.js';
 import { timestamp } from '../db.js';
+import { normalizeNetwork, validateWalletAddress } from '../services/crypto.js';
 
 const router = express.Router();
 
-const ACTION_FILTERS = ['SIGNUP', 'LOGIN', 'ACTIVATED', 'SIGNAL_SCAN', 'SETTINGS_UPDATED'];
+const ACTION_FILTERS = [
+  'SIGNUP',
+  'LOGIN',
+  'ACTIVATED',
+  'SIGNAL_SCAN',
+  'SETTINGS_UPDATED',
+  'PAYMENT_VERIFIED',
+];
 
 function trimmed(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -49,7 +57,7 @@ function positiveInt(value, fallback = null) {
 
 router.get('/settings', async (req, res, next) => {
   try {
-    return res.json({ settings: await getSettings() });
+    return res.json({ settings: await getAdminSettings() });
   } catch (err) {
     return next(err);
   }
@@ -58,6 +66,7 @@ router.get('/settings', async (req, res, next) => {
 router.put('/settings', async (req, res, next) => {
   try {
     const body = req.body ?? {};
+    const current = await getAdminSettings();
     const patch = {};
 
     for (const key of ['affiliate_link', 'support_contact_link']) {
@@ -75,6 +84,44 @@ router.put('/settings', async (req, res, next) => {
         return res.status(400).json({ error: 'app_name must be 1-80 characters' });
       }
       patch.app_name = value;
+    }
+
+    const network =
+      body.crypto_network === undefined
+        ? normalizeNetwork(current.crypto_network) || 'BEP20'
+        : normalizeNetwork(body.crypto_network);
+    if (body.crypto_network !== undefined && !network) {
+      return res.status(400).json({ error: 'crypto_network must be BEP20 or TRC20' });
+    }
+    if (body.crypto_network !== undefined) patch.crypto_network = network;
+
+    if (body.crypto_wallet_address !== undefined) {
+      const wallet = trimmed(body.crypto_wallet_address);
+      if (wallet && !validateWalletAddress(network, wallet)) {
+        return res.status(400).json({
+          error:
+            network === 'BEP20'
+              ? 'crypto_wallet_address must be a BSC (BEP20) address starting with 0x'
+              : 'crypto_wallet_address must be a TRON (TRC20) address starting with T',
+        });
+      }
+      patch.crypto_wallet_address = wallet;
+    } else if (body.crypto_network !== undefined && current.crypto_wallet_address) {
+      // Refuse to leave an address that does not match the new network.
+      if (!validateWalletAddress(network, current.crypto_wallet_address)) {
+        return res.status(400).json({
+          error: 'Update crypto_wallet_address together with the new network',
+        });
+      }
+    }
+
+    for (const key of ['bscscan_api_key', 'trongrid_api_key']) {
+      if (body[key] === undefined) continue;
+      const value = trimmed(body[key]);
+      if (value.length > 200) {
+        return res.status(400).json({ error: `${key} is too long (max 200 characters)` });
+      }
+      patch[key] = value;
     }
 
     if (!Object.keys(patch).length) {

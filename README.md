@@ -54,16 +54,22 @@ Sign in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `backend/.env`.
 
 ```bash
 cd mobile-app
-cp .env.example .env         # VITE_DEFAULT_SERVER_URL = your deployed API
+cp .env.example .env         # VITE_API_BASE_URL = your deployed API (baked in at build time)
 npm install
 npm run dev                  # browser preview of the UI
 npm run build && npx cap sync android
 npx cap open android         # build/run with Android Studio (JDK 21)
 ```
 
-In the Android app: set the server URL, grant **Display over other apps** and
+The backend URL comes only from `VITE_API_BASE_URL`; there is no server field in
+the app. In the Android app: grant **Display over other apps** and
 notifications, then tap **Start Trading Overlay Widget** and approve screen
 capture. The widget floats above Quotex, Exness, TradingView, MetaTrader, etc.
+
+Pending accounts pick a plan from a swipeable carousel: the Free plan leads to
+the affiliate link, support and activation-code step, while the Paid plan opens
+a USDT checkout (BEP20 or TRC20) that the backend verifies on-chain and activates
+automatically. Version **1.0.1** (`versionCode 2`).
 
 ## Deployment
 
@@ -83,6 +89,9 @@ capture. The widget floats above Quotex, Exness, TradingView, MetaTrader, etc.
 - Admin endpoints accept an HTTP-only cookie **or** `Authorization: Bearer`.
 - Login is rate limited (20 per 15 min) and analysis is limited to 30 requests
   per minute per IP.
+- Crypto payments are verified against the transaction receipt and USDT Transfer
+  logs, require the admin-configured wallet and exact-or-higher amount, and a
+  transaction hash can only be redeemed once. Explorer keys stay server-side.
 - Passwords are compared in constant time; JWTs expire after 12 hours.
 - Screenshots are processed in memory and never written to disk.
 - PDFs are limited by `MAX_UPLOAD_MB` and parsed page by page.

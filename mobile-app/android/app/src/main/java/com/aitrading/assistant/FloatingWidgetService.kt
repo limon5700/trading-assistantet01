@@ -26,7 +26,6 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -78,7 +77,10 @@ class FloatingWidgetService : Service() {
         private const val NOTIFICATION_ID = 4310
         private const val ANALYSIS_INTERVAL_MS = 15_000L
         private const val CAPTURE_DELAY_MS = 350L
-        private const val MAX_CAPTURE_WIDTH = 1080
+        private const val MAX_CAPTURE_WIDTH = 1280
+        private const val JPEG_QUALITY = 80
+        private const val MAX_FRAME_ATTEMPTS = 8
+        private const val FRAME_RETRY_MS = 150L
 
         @Volatile
         var isRunning: Boolean = false
@@ -87,8 +89,10 @@ class FloatingWidgetService : Service() {
 
     private lateinit var windowManager: WindowManager
     private var overlayView: View? = null
-    private var rootLayout: LinearLayout? = null
+    private var bubbleView: View? = null
+    private var expandedView: View? = null
     private var dragHandle: View? = null
+    private var bubbleSignal: TextView? = null
     private var signalBadge: TextView? = null
     private var confidenceText: TextView? = null
     private var assetText: TextView? = null
@@ -97,6 +101,10 @@ class FloatingWidgetService : Service() {
     private var reasonText: TextView? = null
     private var statusText: TextView? = null
     private var analyzeButton: TextView? = null
+    private var expandedAnalyzeButton: TextView? = null
+    private var expandButton: TextView? = null
+    private var showLessButton: TextView? = null
+    private var expanded = false
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -244,8 +252,10 @@ class FloatingWidgetService : Service() {
 
         val view = LayoutInflater.from(this).inflate(R.layout.overlay_widget, null)
         overlayView = view
-        rootLayout = view.findViewById(R.id.overlay_root)
+        bubbleView = view.findViewById(R.id.bubble_view)
+        expandedView = view.findViewById(R.id.expanded_view)
         dragHandle = view.findViewById(R.id.drag_handle)
+        bubbleSignal = view.findViewById(R.id.bubble_signal)
         signalBadge = view.findViewById(R.id.signal_badge)
         confidenceText = view.findViewById(R.id.confidence_text)
         assetText = view.findViewById(R.id.asset_text)
@@ -254,6 +264,10 @@ class FloatingWidgetService : Service() {
         reasonText = view.findViewById(R.id.reason_text)
         statusText = view.findViewById(R.id.status_text)
         analyzeButton = view.findViewById(R.id.analyze_button)
+        expandedAnalyzeButton = view.findViewById(R.id.expanded_analyze_button)
+        expandButton = view.findViewById(R.id.expand_button)
+        showLessButton = view.findViewById(R.id.show_less_button)
+        expanded = false
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -275,7 +289,8 @@ class FloatingWidgetService : Service() {
             y = 220
         }
 
-        attachDragHandler(params)
+        attachDragHandler(dragHandle, params)
+        attachDragHandler(bubbleView, params)
         attachActions(view)
 
         try {
@@ -287,8 +302,8 @@ class FloatingWidgetService : Service() {
         }
     }
 
-    private fun attachDragHandler(params: WindowManager.LayoutParams) {
-        val handle = dragHandle ?: return
+    private fun attachDragHandler(target: View?, params: WindowManager.LayoutParams) {
+        val handle = target ?: return
         var startX = 0
         var startY = 0
         var touchX = 0f
@@ -321,14 +336,67 @@ class FloatingWidgetService : Service() {
     }
 
     private fun attachActions(view: View) {
-        analyzeButton?.setOnClickListener {
-            if (analyzing) return@setOnClickListener
-            handler.removeCallbacks(analysisLoop)
-            captureAndAnalyze()
-            handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
+        val analyze = View.OnClickListener {
+            if (!analyzing) {
+                handler.removeCallbacks(analysisLoop)
+                captureAndAnalyze()
+                handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
+            }
         }
+        analyzeButton?.setOnClickListener(analyze)
+        expandedAnalyzeButton?.setOnClickListener(analyze)
+        expandButton?.setOnClickListener { setExpanded(true) }
+        showLessButton?.setOnClickListener { setExpanded(false) }
         view.findViewById<TextView>(R.id.stop_button)?.setOnClickListener {
             stopEverything()
+        }
+    }
+
+    /** Switches between the compact circle and the full signal card. */
+    private fun setExpanded(expand: Boolean) {
+        if (expanded == expand) return
+        expanded = expand
+
+        val show = if (expand) expandedView else bubbleView
+        val hide = if (expand) bubbleView else expandedView
+        if (show == null || hide == null) return
+
+        show.visibility = View.VISIBLE
+        show.alpha = 0f
+        show.scaleX = 0.92f
+        show.scaleY = 0.92f
+        show.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(170).start()
+
+        hide.animate().alpha(0f).scaleX(0.92f).scaleY(0.92f).setDuration(120).withEndAction {
+            hide.visibility = View.GONE
+            hide.alpha = 1f
+            hide.scaleX = 1f
+            hide.scaleY = 1f
+        }.start()
+    }
+
+    private fun setAnalyzeEnabled(enabled: Boolean) {
+        handler.post {
+            analyzeButton?.isEnabled = enabled
+            expandedAnalyzeButton?.isEnabled = enabled
+        }
+    }
+
+    private fun applySignalBadge(badge: TextView?, signal: String) {
+        if (badge == null) return
+        when (signal) {
+            "BUY" -> {
+                badge.text = "BUY"
+                badge.setBackgroundResource(R.drawable.signal_buy)
+            }
+            "SELL" -> {
+                badge.text = "SELL"
+                badge.setBackgroundResource(R.drawable.signal_sell)
+            }
+            else -> {
+                badge.text = "WAIT"
+                badge.setBackgroundResource(R.drawable.signal_wait)
+            }
         }
     }
 
@@ -339,28 +407,17 @@ class FloatingWidgetService : Service() {
     private fun renderAnalysis(analysis: JSONObject) {
         handler.post {
             val signal = analysis.optString("signal", "NO_TRADE").uppercase(Locale.US)
-            val badge = signalBadge ?: return@post
-            when (signal) {
-                "BUY" -> {
-                    badge.text = "BUY"
-                    badge.setBackgroundResource(R.drawable.signal_buy)
-                }
-                "SELL" -> {
-                    badge.text = "SELL"
-                    badge.setBackgroundResource(R.drawable.signal_sell)
-                }
-                else -> {
-                    badge.text = "WAIT"
-                    badge.setBackgroundResource(R.drawable.signal_wait)
-                }
-            }
+            applySignalBadge(bubbleSignal, signal)
+            applySignalBadge(signalBadge, signal)
 
             confidenceText?.text = "${analysis.optInt("confidence", 0)}%"
             assetText?.text = "Asset: ${analysis.optString("asset", "—")}"
             timingText?.text = "Entry: ${analysis.optString("entry_time", "—")}"
             timeframeText?.text = "Timeframe: ${analysis.optString("timeframe", "—")}"
             reasonText?.text = analysis.optString("reason", "")
-            updateStatus("Updated ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}")
+            updateStatus(
+                "Updated ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())} · JSON ok",
+            )
         }
     }
 
@@ -370,40 +427,66 @@ class FloatingWidgetService : Service() {
         if (analyzing || !isRunning) return
         analyzing = true
         updateStatus("Analyzing chart…")
-        analyzeButton?.isEnabled = false
+        setAnalyzeEnabled(false)
+
+        if (imageReader == null) {
+            analyzing = false
+            setAnalyzeEnabled(true)
+            updateStatus("Screen capture is not ready")
+            return
+        }
+
+        handler.postDelayed({ captureFrame(0) }, CAPTURE_DELAY_MS)
+    }
+
+    /**
+     * Grabs a real frame from MediaProjection. The first frames after a capture
+     * session starts can be empty, so retry briefly instead of posting an empty
+     * screenshot (which used to surface as "Analysis Failed").
+     */
+    private fun captureFrame(attempt: Int) {
+        if (!isRunning) {
+            analyzing = false
+            setAnalyzeEnabled(true)
+            return
+        }
 
         val reader = imageReader
         if (reader == null) {
             analyzing = false
-            analyzeButton?.isEnabled = true
+            setAnalyzeEnabled(true)
+            updateStatus("Screen capture is not ready")
             return
         }
 
-        handler.postDelayed({
-            var bitmap: Bitmap? = null
-            var image: android.media.Image? = null
-            try {
-                image = reader.acquireLatestImage()
-                if (image != null) {
-                    bitmap = imageToBitmap(image)
-                }
-            } catch (error: Exception) {
-                Log.w(TAG, "Screen capture failed", error)
-            } finally {
-                image?.close()
+        var bitmap: Bitmap? = null
+        var image: android.media.Image? = null
+        try {
+            image = reader.acquireLatestImage()
+            if (image != null && image.width > 0 && image.height > 0) {
+                bitmap = imageToBitmap(image)
             }
+        } catch (error: Exception) {
+            Log.w(TAG, "Screen capture failed", error)
+        } finally {
+            image?.close()
+        }
 
-            if (bitmap == null) {
+        if (bitmap == null || bitmap.width <= 0 || bitmap.height <= 0) {
+            bitmap?.recycle()
+            if (attempt < MAX_FRAME_ATTEMPTS) {
+                handler.postDelayed({ captureFrame(attempt + 1) }, FRAME_RETRY_MS)
+            } else {
                 analyzing = false
-                analyzeButton?.isEnabled = true
+                setAnalyzeEnabled(true)
                 updateStatus("Waiting for the screen…")
-                return@postDelayed
             }
+            return
+        }
 
-            val payload = bitmapToBase64(bitmap)
-            bitmap.recycle()
-            sendForAnalysis(payload)
-        }, CAPTURE_DELAY_MS)
+        val payload = bitmapToBase64(bitmap)
+        bitmap.recycle()
+        sendForAnalysis(payload)
     }
 
     private fun imageToBitmap(image: android.media.Image): Bitmap? {
@@ -438,11 +521,26 @@ class FloatingWidgetService : Service() {
 
     private fun bitmapToBase64(bitmap: Bitmap): String {
         val stream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 70, stream)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, stream)
         return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
     }
 
     private fun sendForAnalysis(imageBase64: String) {
+        if (serverUrl.isBlank()) {
+            analyzing = false
+            setAnalyzeEnabled(true)
+            broadcastError("This build has no backend URL. Reinstall the official app.")
+            updateStatus("Backend URL missing")
+            return
+        }
+        if (userToken.isBlank()) {
+            analyzing = false
+            setAnalyzeEnabled(true)
+            broadcastError("Your session expired. Open the app and sign in again.")
+            updateStatus("Sign-in required")
+            return
+        }
+
         val endpoint = "${serverUrl.trimEnd('/')}/api/analyze-chart"
         val now = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
         val timezone = TimeZone.getDefault().id
@@ -484,7 +582,7 @@ class FloatingWidgetService : Service() {
                     }.getOrNull().takeUnless { it.isNullOrBlank() }
                         ?: "Server returned HTTP $status"
                     broadcastError(message)
-                    updateStatus("Analysis failed")
+                    updateStatus(if (status == 401) "Sign-in required" else "Analysis failed")
                     return@execute
                 }
 
@@ -498,7 +596,7 @@ class FloatingWidgetService : Service() {
             } finally {
                 connection?.disconnect()
                 analyzing = false
-                handler.post { analyzeButton?.isEnabled = true }
+                setAnalyzeEnabled(true)
             }
         }
     }
@@ -594,6 +692,22 @@ class FloatingWidgetService : Service() {
             }
         }
         overlayView = null
+        bubbleView = null
+        expandedView = null
+        dragHandle = null
+        bubbleSignal = null
+        signalBadge = null
+        confidenceText = null
+        assetText = null
+        timingText = null
+        timeframeText = null
+        reasonText = null
+        statusText = null
+        analyzeButton = null
+        expandedAnalyzeButton = null
+        expandButton = null
+        showLessButton = null
+        expanded = false
     }
 
     override fun onDestroy() {

@@ -1,13 +1,7 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import { useSession } from '../lib/session';
-import {
-  DEFAULT_SERVER_URL,
-  isValidServerUrl,
-  loadServerUrl,
-  normalizeServerUrl,
-  saveServerUrl,
-} from '../lib/settings';
 import { isNativeOverlayAvailable } from '../lib/overlay';
+import { APP_VERSION } from '../lib/settings';
 
 interface SettingsScreenProps {
   onBack: () => void;
@@ -23,24 +17,7 @@ function formatDate(value: string | null): string {
 
 export function SettingsScreen({ onBack }: SettingsScreenProps) {
   const { user, settings, logout } = useSession();
-  const [draft, setDraft] = useState(() => loadServerUrl());
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
-  const flashTimer = useRef<number | null>(null);
-
-  function handleSave() {
-    const next = normalizeServerUrl(draft);
-    if (!isValidServerUrl(next)) {
-      setError('Enter a valid http(s) server URL, for example https://your-api.onrender.com');
-      return;
-    }
-    setError(null);
-    saveServerUrl(next);
-    setDraft(next);
-    setSaved(true);
-    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
-    flashTimer.current = window.setTimeout(() => setSaved(false), 2200);
-  }
 
   function openSupport() {
     if (!settings.support_contact_link) {
@@ -60,7 +37,7 @@ export function SettingsScreen({ onBack }: SettingsScreenProps) {
         </button>
         <div className="header-text">
           <h1>Settings</h1>
-          <p>Account, server and support</p>
+          <p>Account and support</p>
         </div>
       </header>
 
@@ -106,37 +83,6 @@ export function SettingsScreen({ onBack }: SettingsScreenProps) {
         </dl>
       </section>
 
-      <section className="card">
-        <h2>Backend server</h2>
-        <p className="hint">
-          The widget posts screenshots to <code>/api/analyze-chart</code>. The Gemini key stays on the
-          server and is never shipped in this app.
-        </p>
-        <label className="field-label" htmlFor="server-url">
-          Server URL
-        </label>
-        <div className="row">
-          <input
-            id="server-url"
-            className="input"
-            inputMode="url"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            placeholder={DEFAULT_SERVER_URL}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-          />
-          <button type="button" className="btn" onClick={handleSave}>
-            Save
-          </button>
-        </div>
-        {saved ? <p className="saved-flash">Saved — restart the widget to use this server.</p> : null}
-        <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>
-          Active: <code>{loadServerUrl()}</code>
-        </p>
-      </section>
-
       {error ? (
         <div className="alert error" role="alert">
           {error}
@@ -173,7 +119,7 @@ export function SettingsScreen({ onBack }: SettingsScreenProps) {
         </button>
       </section>
 
-      <p className="footer-note">AI Trading Assistant · v1.0.0</p>
+      <p className="footer-note">AI Trading Assistant · v{APP_VERSION}</p>
     </div>
   );
 }

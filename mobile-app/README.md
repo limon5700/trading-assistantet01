@@ -13,8 +13,11 @@ npm run dev        # http://localhost:5174
 ```
 
 Outside the Android shell the plugin calls are disabled and the screen shows the
-UI only. The backend URL defaults to the value in `.env` / `src/lib/settings.ts`
-and is editable in the app.
+UI only. The backend URL is read once from `VITE_API_BASE_URL` in `.env` at
+build time (`src/lib/settings.ts`) and is not editable in the app; the same URL
+is handed to `OverlayPlugin` on sign-in and when the widget starts.
+
+Version **1.0.1** (`versionCode 2`).
 
 ## Android build
 
@@ -53,9 +56,22 @@ on every push and uploads them as artifacts. Optional signing secrets:
   the screenshot to ≤1080 px wide, JPEG-compresses it, and posts
   `{ imageBase64, currentTime, timezone }` to `/api/analyze-chart`. The parsed
   signal updates the widget and is forwarded to the app UI.
-- `res/layout/overlay_widget.xml` — compact card: status line, colour-coded
-  signal badge (BUY green / SELL red / WAIT gray), confidence, asset, entry time
-  and timeframe.
+- `res/layout/overlay_widget.xml` — two states: a small circular bubble
+  (signal badge, Analyze button, Show more) and an expanded card with
+  confidence, asset, entry time, timeframe, reason, JSON status, Analyze and
+  Show less.
+
+Capture runs every 15 s and waits for a real, non-empty `Image` frame (up to 8
+retries) before JPEG-compressing at quality 80 with a maximum width of 1280 px.
+Requests carry `Authorization: Bearer <user JWT>`; a blank token or missing
+backend URL reports a clear error instead of a generic failure.
+
+## Activation and payments
+
+Pending users swipe horizontally through plan cards. The Free plan opens the
+affiliate/support/activation-code step; the Paid plan opens the USDT checkout
+(BEP20 or TRC20) with the exact amount, a copyable wallet, a TxID field and
+auto-polling until verification activates the account.
 
 The widget colour is also applied to the card border so the signal is readable
 at a glance. Tapping "Analyze" inside the widget forces an immediate capture;

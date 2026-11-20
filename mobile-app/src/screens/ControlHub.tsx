@@ -12,7 +12,7 @@ import {
   type ChartAnalysis,
   type OverlayPermissionState,
 } from '../lib/overlay';
-import { isValidServerUrl, loadServerUrl } from '../lib/settings';
+import { API_BASE_URL, isConfiguredServerUrl } from '../lib/settings';
 
 const EMPTY_PERMISSIONS: OverlayPermissionState = {
   overlay: false,
@@ -48,7 +48,6 @@ interface ControlHubProps {
 export function ControlHub({ onOpenSettings }: ControlHubProps) {
   const { user, token, settings } = useSession();
   const native = isNativeOverlayAvailable();
-  const [serverUrl] = useState<string>(() => loadServerUrl());
   const [permissions, setPermissions] = useState<OverlayPermissionState>(EMPTY_PERMISSIONS);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,11 +122,11 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
     };
   }, [native, refreshPermissions]);
 
-  // Keep a running overlay pointed at the current token/session.
+  // Keep a running overlay pointed at the configured backend and current token.
   useEffect(() => {
     if (!native || !permissions.running || !token) return;
-    TradingOverlay.updateServerUrl({ serverUrl, token }).catch(() => undefined);
-  }, [native, permissions.running, serverUrl, token]);
+    TradingOverlay.updateServerUrl({ serverUrl: API_BASE_URL, token }).catch(() => undefined);
+  }, [native, permissions.running, token]);
 
   async function handleToggle() {
     if (busy) return;
@@ -152,8 +151,8 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
         setError('Sign in again before starting the widget.');
         return;
       }
-      if (!isValidServerUrl(serverUrl)) {
-        setError('Set a valid backend server URL in settings before starting.');
+      if (!isConfiguredServerUrl()) {
+        setError('This build is missing its backend URL. Reinstall the official app.');
         return;
       }
 
@@ -173,7 +172,7 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
       }
 
       setNotice('Approve screen capture in the Android dialog to start analysing charts.');
-      const result = await TradingOverlay.startOverlay({ serverUrl, token });
+      const result = await TradingOverlay.startOverlay({ serverUrl: API_BASE_URL, token });
       if (result.started) {
         setPermissions((current) => ({ ...current, running: true }));
         setNotice(null);
