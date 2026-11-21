@@ -127,20 +127,140 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** Vision-capable models that can be tried if the configured one is missing. */
-const FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
-
 function analysisError(message, status, code) {
   return Object.assign(new Error(message), { status, code });
 }
 
 /**
- * Turns an SDK error into an actionable API error. `retryModel` is true when a
- * different Gemini model might succeed (missing/unsupported model or an
- * overloaded service), and false for quota, key or safety failures.
+ * Known-good vision models, used in this order after the configured model and
+ * as the offline fallback when the model list cannot be fetched.
+ */
+const PREFERRED_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-flash-latest',
+  'gemini-flash-lite-latest',
+  'gemini-2.5-pro',
+  'gemini-pro-latest',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+];
+
+const MODEL_LIST_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+const MODEL_CACHE_MS = 10 * 60 * 1000;
+const MODEL_LIST_TIMEOUT_MS = 8000;
+/** Image generation, speech, embedding and agent-only models cannot return our JSON signal. */
+const NON_ANALYSIS_MODEL =
+  /(?:^|[-_])(?:image|tts|transcribe|lyria|embedding|nano-banana|robotics|computer-use|deep-research|antigravity|omni)(?:[-_]|$)/i;
+
+let modelCache = { at: 0, models: [] };
+/** Models that recently failed, so the next scan does not pay for them again. */
+const modelCooldown = new Map();
+const COOLDOWN_MISSING_MS = 10 * 60 * 1000;
+const COOLDOWN_TRANSIENT_MS = 60 * 1000;
+let lastGoodModel = null;
+
+function isCoolingDown(name) {
+  const until = modelCooldown.get(name);
+  if (!until) return false;
+  if (until > Date.now()) return true;
+  modelCooldown.delete(name);
+  return false;
+}
+
+function quarantineModel(name, error, haystack) {
+  const missing = Number(error?.status) === 404 || /404|not found|not supported|unsupported|does not exist/.test(haystack);
+  modelCooldown.set(name, Date.now() + (missing ? COOLDOWN_MISSING_MS : COOLDOWN_TRANSIENT_MS));
+}
+
+function isAnalysisModel(name) {
+  return typeof name === 'string' && /^gemini-/i.test(name) && !NON_ANALYSIS_MODEL.test(name);
+}
+
+/** Newer, stable, lower-cost models first; Pro models last because they are slower. */
+function modelScore(name) {
+  const n = name.toLowerCase();
+  const version = /gemini-(\d+)(?:\.(\d+))?/.exec(n);
+  const versionScore = version ? Number(version[1]) * 10 + Number(version[2] || 0) : 0;
+  const experimental = /preview|exp\b|experimental|customtools|thinking/.test(n) ? 0 : 1;
+  const tier = /pro/.test(n) ? 3 : /lite/.test(n) ? 1 : /flash/.test(n) ? 0 : 2;
+  return { experimental, versionScore, tier };
+}
+
+function compareModels(a, b) {
+  const sa = modelScore(a);
+  const sb = modelScore(b);
+  if (sa.experimental !== sb.experimental) return sb.experimental - sa.experimental;
+  if (sa.versionScore !== sb.versionScore) return sb.versionScore - sa.versionScore;
+  if (sa.tier !== sb.tier) return sa.tier - sb.tier;
+  return a.localeCompare(b);
+}
+
+/**
+ * Asks the Gemini API which models this key can actually call and caches the
+ * answer. A network or key problem here is not fatal: the caller falls back to
+ * the preferred list and the analysis request reports the real error.
+ */
+async function discoverModels() {
+  if (modelCache.models.length && Date.now() - modelCache.at < MODEL_CACHE_MS) {
+    return modelCache.models;
+  }
+
+  try {
+    const response = await fetch(`${MODEL_LIST_URL}?pageSize=1000`, {
+      headers: { 'x-goog-api-key': config.gemini.apiKey },
+      signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`model list returned HTTP ${response.status}`);
+    const payload = await response.json();
+    const models = (payload?.models ?? [])
+      .filter((model) => (model?.supportedGenerationMethods ?? []).includes('generateContent'))
+      .map((model) => String(model.name || '').replace(/^models\//, ''))
+      .filter(isAnalysisModel);
+
+    if (!models.length) throw new Error('model list was empty');
+    modelCache = { at: Date.now(), models: models.sort(compareModels) };
+    console.log(`[gemini] ${models.length} analysis models available`);
+    return modelCache.models;
+  } catch (error) {
+    console.warn(`[gemini] could not list models: ${error?.message || error}`);
+    return modelCache.models;
+  }
+}
+
+/**
+ * Builds the failover chain: the configured model first, then every preferred
+ * model, then the rest of the models discovered for this key. This is what
+ * makes a configured Lite, Flash or Pro model work even when another model is
+ * retired, overloaded or out of quota.
+ */
+async function buildModelChain() {
+  const discovered = await discoverModels();
+  const chain = [
+    config.gemini.model,
+    lastGoodModel,
+    ...PREFERRED_MODELS,
+    ...discovered,
+  ]
+    .map((name) => String(name || '').trim())
+    .filter(Boolean);
+
+  const unique = [...new Set(chain)];
+  // Skip models that just failed; if they all failed, retry them rather than
+  // returning no model at all.
+  const healthy = unique.filter((name) => !isCoolingDown(name));
+  return (healthy.length ? healthy : unique).slice(0, config.gemini.maxModelAttempts);
+}
+
+/**
+ * Turns an SDK error into an actionable API error. Only a key or project
+ * permission failure stops the chain; every other failure (retired model,
+ * overload, quota, timeout, malformed JSON) moves on to the next model.
  */
 function describeGeminiError(error) {
-  if (error?.status && error?.code) return { error, retryModel: false };
+  if (error?.status && error?.code) return { error, retryModel: error.code !== 'GEMINI_KEY_INVALID' };
 
   const message = String(error?.message || error || 'Unknown Gemini error');
   const details = JSON.stringify(error?.errorDetails ?? error?.response?.data ?? '');
@@ -182,7 +302,7 @@ function describeGeminiError(error) {
         503,
         'GEMINI_QUOTA_EXCEEDED',
       ),
-      retryModel: false,
+      retryModel: true,
     };
   }
   if (haystack.includes('safety') || haystack.includes('blocked')) {
@@ -192,24 +312,11 @@ function describeGeminiError(error) {
         422,
         'GEMINI_BLOCKED',
       ),
-      retryModel: false,
+      retryModel: true,
     };
   }
-  if (
-    haystack.includes('404') ||
-    haystack.includes('not found') ||
-    haystack.includes('not supported') ||
-    haystack.includes('unsupported') ||
-    haystack.includes('503') ||
-    haystack.includes('unavailable') ||
-    haystack.includes('overloaded') ||
-    haystack.includes('non-json') ||
-    haystack.includes('invalid signal')
-  ) {
-    return { error, retryModel: true };
-  }
 
-  return { error, retryModel: false };
+  return { error, retryModel: true };
 }
 
 function parseModelJson(text) {
@@ -225,17 +332,27 @@ function parseModelJson(text) {
 
 /**
  * Runs the vision analysis against the active knowledge base and returns the
- * strictly validated structured signal. Falls back to another vision model
- * when the configured one is retired or temporarily unavailable.
+ * strictly validated structured signal. Models are tried in order (configured
+ * model first, then every other available Gemini model) until one answers, so
+ * a retired, overloaded, rate-limited or schema-incompatible model never takes
+ * the endpoint down.
  */
 export async function analyzeChart({ imageBase64, mimeType, currentTime, timezone }) {
   const activeEntries = await getActiveKnowledge();
   const knowledgeBlock = buildKnowledgePrompt(activeEntries);
 
-  const models = [...new Set([config.gemini.model, ...FALLBACK_MODELS].filter(Boolean))];
+  const models = await buildModelChain();
+  const deadline = Date.now() + config.gemini.timeoutMs;
+  const attempted = [];
   let lastError = null;
 
   for (const modelName of models) {
+    const remaining = deadline - Date.now();
+    if (remaining < 4000) {
+      lastError = analysisError('Gemini request timed out', 504, 'GEMINI_TIMEOUT');
+      break;
+    }
+
     const model = genAI.getGenerativeModel({
       model: modelName,
       systemInstruction: `${BASE_SYSTEM_INSTRUCTION}\n\nGLOBAL TRADING KNOWLEDGE BASE (authoritative, ${activeEntries.length} active entries):\n${knowledgeBlock}`,
@@ -248,6 +365,7 @@ export async function analyzeChart({ imageBase64, mimeType, currentTime, timezon
       },
     });
 
+    attempted.push(modelName);
     try {
       const result = await withTimeout(
         model.generateContent([
@@ -265,30 +383,38 @@ Trader timezone: ${timezone || 'unknown'}
 Return the JSON decision now.`,
           },
         ]),
-        config.gemini.timeoutMs,
+        Math.min(remaining, config.gemini.attemptTimeoutMs),
       );
 
       const parsed = parseModelJson(result.response.text());
+      const analysis = validateAnalysis(parsed);
+      lastGoodModel = modelName;
+      modelCooldown.delete(modelName);
       return {
-        analysis: validateAnalysis(parsed),
+        analysis,
         knowledgeEntriesUsed: activeEntries.length,
         model: modelName,
+        modelsAttempted: attempted,
       };
     } catch (error) {
-      const { error: mapped, retryModel } = describeGeminiError(error);
+      const timedOut = String(error?.message || '').includes('timed out');
+      const { error: mapped, retryModel } = timedOut
+        ? { error: analysisError('Gemini request timed out', 504, 'GEMINI_TIMEOUT'), retryModel: true }
+        : describeGeminiError(error);
       lastError = mapped;
-      if (String(mapped.message).includes('timed out')) throw mapped;
       if (!retryModel) throw mapped;
-      console.warn(`[gemini] ${modelName} failed, trying the next model: ${mapped.message}`);
+      quarantineModel(modelName, error, `${error?.message || ''} ${mapped.message}`.toLowerCase());
+      console.warn(`[gemini] ${modelName} failed (${mapped.code || mapped.status || 'error'}), trying the next model`);
     }
   }
 
-  throw (
-    lastError ||
-    analysisError(
-      'No Gemini vision model is available. Check GEMINI_MODEL and the API key.',
-      502,
-      'GEMINI_MODEL_UNAVAILABLE',
-    )
+  if (lastError?.code === 'GEMINI_TIMEOUT') throw lastError;
+
+  if (lastError?.status) throw lastError;
+
+  throw analysisError(
+    `No Gemini model answered (tried ${attempted.length}). ${lastError?.message || 'Check GEMINI_MODEL and the API key.'}`,
+    502,
+    'GEMINI_MODEL_UNAVAILABLE',
   );
 }

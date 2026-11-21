@@ -114,7 +114,7 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
     if (image.error) return res.status(image.status || 400).json({ error: image.error });
 
     const { currentTime, timezone } = req.body ?? {};
-    const { analysis, knowledgeEntriesUsed, model } = await analyzeChart({
+    const { analysis, knowledgeEntriesUsed, model, modelsAttempted } = await analyzeChart({
       imageBase64: image.data,
       mimeType: image.mimeType,
       currentTime: typeof currentTime === 'string' ? currentTime.slice(0, 64) : '',
@@ -130,6 +130,7 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
         asset: analysis.asset,
         timeframe: analysis.timeframe,
         model,
+        models_attempted: modelsAttempted,
         knowledge_entries: knowledgeEntriesUsed,
       },
     });
@@ -137,6 +138,7 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
     res.set('Cache-Control', 'no-store');
     res.set('X-Knowledge-Entries', String(knowledgeEntriesUsed));
     res.set('X-Gemini-Model', model);
+    res.set('X-Gemini-Attempts', String(modelsAttempted.length));
     return res.json(analysis);
   } catch (error) {
     if (String(error.message).includes('timed out')) {
