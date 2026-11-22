@@ -458,6 +458,7 @@ export async function getPublicSettings() {
     affiliate_link: settings.affiliate_link ?? '',
     support_contact_link: settings.support_contact_link ?? '',
     app_name: settings.app_name ?? 'AI Trading Assistant',
+    app_icon_url: settings.app_icon_url ?? '',
     default_plan_type: settings.default_plan_type ?? 'FREE',
     crypto_network: settings.crypto_network === 'TRC20' ? 'TRC20' : 'BEP20',
     crypto_wallet_address: settings.crypto_wallet_address ?? '',

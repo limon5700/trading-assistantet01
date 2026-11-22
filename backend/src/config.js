@@ -77,7 +77,13 @@ export const config = {
   uploads: {
     maxBytes: int('MAX_UPLOAD_MB', 25) * 1024 * 1024,
     maxMb: int('MAX_UPLOAD_MB', 25),
+    // Everything uploaded at runtime lives under the backend folder so a
+    // deployment only has to persist one directory (or attach a volume).
+    dir: path.resolve(backendRoot, process.env.UPLOADS_DIR || './data/uploads'),
+    iconMaxBytes: int('MAX_ICON_KB', 2048) * 1024,
+    publicPath: '/uploads',
   },
+  publicBaseUrl: (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, ''),
   crypto: {
     // Optional overrides; the admin panel can also store explorer keys.
     bscRpcUrl: (process.env.BSC_RPC_URL || '').trim(),

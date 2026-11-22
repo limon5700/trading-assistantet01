@@ -9,6 +9,8 @@ import PlansPage from './pages/PlansPage';
 import ActivationCodesPage from './pages/ActivationCodesPage';
 import SettingsPage from './pages/SettingsPage';
 import ActivitiesPage from './pages/ActivitiesPage';
+import StrategiesPage from './pages/StrategiesPage';
+import BrandingPage from './pages/BrandingPage';
 
 export default function App() {
   return (
@@ -54,6 +56,22 @@ export default function App() {
               element={
                 <RequireAuth>
                   <ActivitiesPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/strategies"
+              element={
+                <RequireAuth>
+                  <StrategiesPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/branding"
+              element={
+                <RequireAuth>
+                  <BrandingPage />
                 </RequireAuth>
               }
             />

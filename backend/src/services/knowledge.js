@@ -1,12 +1,33 @@
 import { getDb, timestamp } from '../db.js';
 import { config } from '../config.js';
 
-const SUMMARY_COLUMNS = `id, title, source_type, file_name, page_count, is_active, created_at, updated_at`;
+export const KNOWLEDGE_CATEGORIES = ['BINARY', 'FOREX', 'GENERAL'];
 
-export async function listKnowledge() {
+const SUMMARY_COLUMNS = `id, title, category, source_type, file_name, pdf_file_path, page_count, is_active, created_at, updated_at`;
+
+export function normalizeCategory(value, fallback = 'GENERAL') {
+  const category = String(value ?? '').trim().toUpperCase();
+  return KNOWLEDGE_CATEGORIES.includes(category) ? category : fallback;
+}
+
+export function mapKnowledge(row) {
+  if (!row) return null;
+  return { ...row, is_active: Number(row.is_active) === 1 };
+}
+
+export async function listKnowledge({ category = '' } = {}) {
   const db = await getDb();
+  const where = [];
+  const params = [];
+  if (category) {
+    where.push('category = ?');
+    params.push(normalizeCategory(category));
+  }
   return db.all(
-    `SELECT ${SUMMARY_COLUMNS} FROM knowledge_base ORDER BY is_active DESC, updated_at DESC, id DESC`,
+    `SELECT ${SUMMARY_COLUMNS} FROM knowledge_base
+     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+     ORDER BY is_active DESC, updated_at DESC, id DESC`,
+    params,
   );
 }
 
@@ -15,32 +36,55 @@ export async function getKnowledge(id) {
   return db.get('SELECT * FROM knowledge_base WHERE id = ?', [id]);
 }
 
-export async function createKnowledge({ title, sourceType, content, fileName = null, pageCount = 0, isActive = true }) {
+export async function createKnowledge({
+  title,
+  category = 'GENERAL',
+  sourceType,
+  content,
+  fileName = null,
+  pdfFilePath = null,
+  pageCount = 0,
+  isActive = true,
+}) {
   const db = await getDb();
   const now = timestamp();
   const result = await db.run(
     `INSERT INTO knowledge_base
-       (title, source_type, content, file_name, page_count, is_active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [title, sourceType, content, fileName, pageCount, isActive ? 1 : 0, now, now],
+       (title, category, source_type, content, file_name, pdf_file_path, page_count, is_active, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      title,
+      normalizeCategory(category),
+      sourceType,
+      content,
+      fileName,
+      pdfFilePath,
+      pageCount,
+      isActive ? 1 : 0,
+      now,
+      now,
+    ],
   );
   return getKnowledge(result.insertId);
 }
 
-export async function updateKnowledge(id, { title, content, isActive }) {
+export async function updateKnowledge(id, { title, category, content, isActive }) {
   const db = await getDb();
   const current = await getKnowledge(id);
   if (!current) return null;
 
   const next = {
     title: title === undefined ? current.title : title,
+    category: category === undefined ? current.category : normalizeCategory(category, current.category),
     content: content === undefined ? current.content : content,
     isActive: isActive === undefined ? Number(current.is_active) === 1 : Boolean(isActive),
   };
 
   await db.run(
-    'UPDATE knowledge_base SET title = ?, content = ?, is_active = ?, updated_at = ? WHERE id = ?',
-    [next.title, next.content, next.isActive ? 1 : 0, timestamp(), id],
+    `UPDATE knowledge_base
+     SET title = ?, category = ?, content = ?, is_active = ?, updated_at = ?
+     WHERE id = ?`,
+    [next.title, next.category, next.content, next.isActive ? 1 : 0, timestamp(), id],
   );
 
   return getKnowledge(id);
@@ -48,15 +92,24 @@ export async function updateKnowledge(id, { title, content, isActive }) {
 
 export async function deleteKnowledge(id) {
   const db = await getDb();
+  const current = await getKnowledge(id);
   const result = await db.run('DELETE FROM knowledge_base WHERE id = ?', [id]);
-  return result.affectedRows > 0;
+  return result.affectedRows > 0 ? current : null;
 }
 
-/** Returns all active entries, newest first, both full rows and summary counts. */
-export async function getActiveKnowledge() {
+/**
+ * Active entries for one analysis mode. Binary scans read the BINARY library,
+ * forex scans read the FOREX library — the two never bleed into each other.
+ */
+export async function getActiveKnowledge(category) {
   const db = await getDb();
+  const mode = normalizeCategory(category, 'GENERAL');
   return db.all(
-    'SELECT id, title, source_type, content, page_count FROM knowledge_base WHERE is_active = 1 ORDER BY updated_at DESC, id DESC',
+    `SELECT id, title, category, source_type, content, page_count
+     FROM knowledge_base
+     WHERE is_active = 1 AND category = ?
+     ORDER BY updated_at DESC, id DESC`,
+    [mode],
   );
 }
 
@@ -67,7 +120,7 @@ export async function getActiveKnowledge() {
  */
 export function buildKnowledgePrompt(entries) {
   if (!entries.length) {
-    return 'No global knowledge entries are currently active. Analyse the chart using sound price-action and candlestick principles only.';
+    return 'No strategy entries are active for this mode. Analyse the chart using the built-in price-action, candlestick and smart-money principles only.';
   }
 
   const maxChars = config.gemini.maxKnowledgeChars;

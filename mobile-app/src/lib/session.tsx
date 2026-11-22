@@ -10,14 +10,36 @@ import {
 import {
   ApiError,
   paymentApi,
+  publicApi,
+  tradeSettingsApi,
   userApi,
   type AppSettings,
   type AuthUser,
   type Plan,
+  type PublicConfig,
   type SignupInput,
+  type TradeSettings,
 } from './api';
 
 const TOKEN_KEY = 'ai_trading_user_token';
+const VOICE_KEY = 'ai_trading_voice_enabled';
+
+export const DEFAULT_TRADE_SETTINGS: TradeSettings = {
+  binary_min_confidence: 70,
+  binary_duration_seconds: 60,
+  binary_strategy: '',
+  forex_min_confidence: 70,
+  forex_timeframe: '15M',
+  forex_strategy: '',
+};
+
+function readVoicePreference(): boolean {
+  try {
+    return window.localStorage.getItem(VOICE_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
 
 function readStoredToken(): string | null {
   try {
@@ -42,6 +64,11 @@ interface SessionValue {
   user: AuthUser | null;
   plans: Plan[];
   settings: AppSettings;
+  config: PublicConfig | null;
+  tradeSettings: TradeSettings;
+  voiceAlerts: boolean;
+  setVoiceAlerts: (enabled: boolean) => void;
+  saveTradeSettings: (patch: Partial<TradeSettings>) => Promise<TradeSettings>;
   login: (identifier: string, password: string) => Promise<void>;
   signup: (input: SignupInput) => Promise<void>;
   activate: (code: string) => Promise<void>;
@@ -60,6 +87,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [settings, setSettings] = useState<AppSettings>(EMPTY_SETTINGS);
+  const [config, setConfig] = useState<PublicConfig | null>(null);
+  const [tradeSettings, setTradeSettings] = useState<TradeSettings>(DEFAULT_TRADE_SETTINGS);
+  const [voiceAlerts, setVoiceAlertsState] = useState<boolean>(() => readVoicePreference());
 
   const applySession = useCallback((payload: { user: AuthUser; plans: Plan[]; settings: AppSettings }) => {
     setUser(payload.user);
@@ -73,6 +103,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setUser(null);
     setPlans([]);
     setSettings(EMPTY_SETTINGS);
+  }, []);
+
+  // Public branding, legal pages and plans are available even before sign-in.
+  useEffect(() => {
+    let cancelled = false;
+    publicApi
+      .config()
+      .then((value) => {
+        if (!cancelled) setConfig(value);
+      })
+      .catch(() => {
+        // Offline launch keeps the built-in name; the next call retries.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Validate the stored token on launch so an expired session lands on login.
@@ -159,6 +205,45 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [applySession, clearSession, token]);
 
+  // Trade preferences live on the server so the Android widget can read them
+  // through /api/analyze-chart defaults even when the web UI is closed.
+  useEffect(() => {
+    if (!token) {
+      setTradeSettings(DEFAULT_TRADE_SETTINGS);
+      return undefined;
+    }
+    let cancelled = false;
+    tradeSettingsApi
+      .get(token)
+      .then((response) => {
+        if (!cancelled) setTradeSettings({ ...DEFAULT_TRADE_SETTINGS, ...response.settings });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  const setVoiceAlerts = useCallback((enabled: boolean) => {
+    setVoiceAlertsState(enabled);
+    try {
+      window.localStorage.setItem(VOICE_KEY, enabled ? 'on' : 'off');
+    } catch {
+      // Storage can be unavailable in private browsing.
+    }
+  }, []);
+
+  const saveTradeSettings = useCallback(
+    async (patch: Partial<TradeSettings>) => {
+      if (!token) throw new ApiError('Please sign in again', 401);
+      const response = await tradeSettingsApi.save(token, patch);
+      const merged = { ...DEFAULT_TRADE_SETTINGS, ...response.settings };
+      setTradeSettings(merged);
+      return merged;
+    },
+    [token],
+  );
+
   const logout = useCallback(() => {
     clearSession();
   }, [clearSession]);
@@ -170,6 +255,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       user,
       plans,
       settings,
+      config,
+      tradeSettings,
+      voiceAlerts,
+      setVoiceAlerts,
+      saveTradeSettings,
       login,
       signup,
       activate,
@@ -183,6 +273,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       user,
       plans,
       settings,
+      config,
+      tradeSettings,
+      voiceAlerts,
+      setVoiceAlerts,
+      saveTradeSettings,
       login,
       signup,
       activate,

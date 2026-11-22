@@ -4,7 +4,7 @@ import { TypeBadge } from './Badge';
 import { Switch } from './Switch';
 import { useToast } from './ToastProvider';
 import { ApiError, api } from '../lib/api';
-import type { KnowledgeEntry } from '../lib/types';
+import type { KnowledgeCategory, KnowledgeEntry } from '../lib/types';
 
 interface EditModalProps {
   entryId: number | null;
@@ -16,6 +16,7 @@ export function EditModal({ entryId, onClose, onSaved }: EditModalProps) {
   const toast = useToast();
   const [entry, setEntry] = useState<KnowledgeEntry | null>(null);
   const [title, setTitle] = useState('');
+  const [entryCategory, setEntryCategory] = useState<KnowledgeCategory>('GENERAL');
   const [content, setContent] = useState('');
   const [isActive, setIsActive] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -39,6 +40,7 @@ export function EditModal({ entryId, onClose, onSaved }: EditModalProps) {
         if (cancelled) return;
         setEntry(response.item);
         setTitle(response.item.title);
+        setEntryCategory(response.item.category);
         setContent(response.item.content);
         setIsActive(response.item.is_active);
       })
@@ -63,7 +65,12 @@ export function EditModal({ entryId, onClose, onSaved }: EditModalProps) {
     setError(null);
     setSaving(true);
     try {
-      const { item } = await api.updateKnowledge(entryId, { title, content, isActive });
+      const { item } = await api.updateKnowledge(entryId, {
+        title,
+        content,
+        isActive,
+        category: entryCategory,
+      });
       toast.success('Knowledge updated.');
       onSaved(item);
       onClose();
@@ -110,6 +117,23 @@ export function EditModal({ entryId, onClose, onSaved }: EditModalProps) {
             {entry.file_name ? (
               <span className="truncate text-xs text-slate-500">{entry.file_name}</span>
             ) : null}
+          </div>
+
+          <div>
+            <label className="label" htmlFor="edit-category">
+              Strategy category
+            </label>
+            <select
+              id="edit-category"
+              className="input"
+              value={entryCategory}
+              onChange={(event) => setEntryCategory(event.target.value as KnowledgeCategory)}
+              disabled={saving}
+            >
+              <option value="BINARY">Binary strategies</option>
+              <option value="FOREX">Forex strategies</option>
+              <option value="GENERAL">General knowledge</option>
+            </select>
           </div>
 
           <div>

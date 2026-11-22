@@ -21,6 +21,11 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
         },
+        // Branding icons and stored strategy PDFs.
+        '/uploads': {
+          target: apiTarget,
+          changeOrigin: true,
+        },
       },
     },
     preview: {
@@ -28,6 +33,10 @@ export default defineConfig(({ mode }) => {
       port: 4173,
       proxy: {
         '/api': {
+          target: apiTarget,
+          changeOrigin: true,
+        },
+        '/uploads': {
           target: apiTarget,
           changeOrigin: true,
         },

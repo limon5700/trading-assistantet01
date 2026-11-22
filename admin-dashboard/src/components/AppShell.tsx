@@ -4,6 +4,8 @@ import { useAuth } from './AuthProvider';
 
 const LINKS = [
   { to: '/', label: 'Knowledge', end: true },
+  { to: '/strategies', label: 'Strategies', end: false },
+  { to: '/branding', label: 'Branding', end: false },
   { to: '/users', label: 'Users', end: false },
   { to: '/plans', label: 'Plans', end: false },
   { to: '/activation-codes', label: 'Codes', end: false },

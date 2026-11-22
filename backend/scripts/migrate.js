@@ -5,7 +5,7 @@ async function main() {
   const client = await initSchema();
   const target = client === 'mysql' ? `${config.db.mysql.host}/${config.db.mysql.database}` : config.db.sqlitePath;
   console.log(
-    `[migrate] knowledge_base, plans, users, activation_codes, app_settings and user_activities are ready on ${client} (${target})`,
+    `[migrate] knowledge_base (BINARY/FOREX/GENERAL), cms_pages, user_trade_settings, plans, users, activation_codes, app_settings and user_activities are ready on ${client} (${target})`,
   );
   await closeDb();
 }

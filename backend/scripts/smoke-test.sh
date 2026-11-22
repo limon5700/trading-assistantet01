@@ -59,6 +59,14 @@ check "me with token" 200 "$(code "$B/api/auth/me" -H "Authorization: Bearer $US
 check "me exposes plans" 2 "$(field "len(d['plans'])")"
 check "me exposes affiliate_link" "yes" "$(field "'affiliate_link' in d['settings'] and 'yes' or 'no'")"
 
+# --- public config (branding, legal pages, plans) ------------------------
+check "public config" 200 "$(code "$B/api/public/config")"
+check "public config app name" "AI Trading Assistant" "$(field "d['app_name']")"
+check "public config terms" "yes" "$(field "'yes' if len(d['terms_and_conditions']) > 200 else 'no'")"
+check "public config about" "yes" "$(field "'yes' if len(d['about_us']) > 200 else 'no'")"
+check "public config icon field" "yes" "$(field "'yes' if 'app_icon_url' in d else 'no'")"
+check "public config plans" 2 "$(field "len(d['plans'])")"
+
 # --- analysis gate ------------------------------------------------------
 check "analyze blocked while pending" 403 "$(code -X POST "$B/api/analyze-chart" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d '{"imageBase64":"x"}')"
 check "gate code" ACCOUNT_NOT_ACTIVE "$(field "d['code']")"
@@ -69,6 +77,26 @@ ADMIN_TOKEN=$(field "d['token']")
 check "admin users requires auth" 401 "$(code "$B/api/admin/users")"
 check "admin lists users" 200 "$(code "$B/api/admin/users?search=trader" -H "Authorization: Bearer $ADMIN_TOKEN")"
 check "admin user found" 1 "$(field "d['total']")"
+
+# --- seeded strategy libraries ------------------------------------------
+code "$B/api/admin/knowledge?category=BINARY" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
+check "binary strategies seeded" 4 "$(field "d['count']")"
+check "seeded entries carry category" "BINARY" "$(field "d['items'][0]['category']")"
+code "$B/api/admin/knowledge?category=FOREX" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
+check "forex strategies seeded" 4 "$(field "d['count']")"
+check "forex entries carry category" "FOREX" "$(field "d['items'][0]['category']")"
+check "bad category filter rejected" 400 "$(code "$B/api/admin/knowledge?category=STOCKS" -H "Authorization: Bearer $ADMIN_TOKEN")"
+
+check "add binary text strategy" 201 "$(code -X POST "$B/api/admin/knowledge/text" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"Smoke binary rule","category":"BINARY","content":"Only trade with the 1M impulse after a level rejection.","is_active":true}')"
+NEW_KNOWLEDGE=$(field "d['item']['id']")
+check "new strategy category" BINARY "$(field "d['item']['category']")"
+code "$B/api/admin/knowledge?category=BINARY" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
+check "binary library grew" 5 "$(field "d['count']")"
+check "strategy recategorised" 200 "$(code -X PUT "$B/api/admin/knowledge/$NEW_KNOWLEDGE" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"category":"FOREX"}')"
+check "strategy category now forex" FOREX "$(field "d['item']['category']")"
+check "invalid strategy category rejected" 400 "$(code -X POST "$B/api/admin/knowledge/text" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"x","content":"y","category":"STOCKS"}')"
+check "no stored pdf on text entry" 404 "$(code "$B/api/admin/knowledge/$NEW_KNOWLEDGE/file" -H "Authorization: Bearer $ADMIN_TOKEN")"
+check "delete smoke strategy" 200 "$(code -X DELETE "$B/api/admin/knowledge/$NEW_KNOWLEDGE" -H "Authorization: Bearer $ADMIN_TOKEN")"
 
 check "admin plans list" 200 "$(code "$B/api/admin/plans" -H "Authorization: Bearer $ADMIN_TOKEN")"
 PLAN_ID=$(field "d['items'][1]['id']")
@@ -81,6 +109,28 @@ check "invalid crypto network rejected" 400 "$(code -X PUT "$B/api/admin/setting
 check "invalid crypto wallet rejected" 400 "$(code -X PUT "$B/api/admin/settings" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"crypto_network":"BEP20","crypto_wallet_address":"0x1234"}')"
 check "crypto settings saved" 200 "$(code -X PUT "$B/api/admin/settings" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"crypto_network":"BEP20","crypto_wallet_address":"0x1111111111111111111111111111111111111111","bscscan_api_key":"smoke-explorer-key"}')"
 check "crypto wallet stored" "0x1111111111111111111111111111111111111111" "$(field "d['settings']['crypto_wallet_address']")"
+
+# --- CMS pages & app branding -------------------------------------------
+check "cms list" 200 "$(code "$B/api/admin/cms" -H "Authorization: Bearer $ADMIN_TOKEN")"
+check "cms has both pages" 2 "$(field "len(d['items'])")"
+check "cms update terms" 200 "$(code -X PUT "$B/api/admin/cms/terms" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"Terms & Conditions","content":"# Smoke terms\n\nUpdated legal copy for the smoke test."}')"
+check "cms invalid slug" 400 "$(code -X PUT "$B/api/admin/cms/privacy" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"content":"x"}')"
+code "$B/api/public/config" >/dev/null
+check "public terms updated" "yes" "$(field "'yes' if 'Smoke terms' in d['terms_and_conditions'] else 'no'")"
+check "cms delete about" 200 "$(code -X DELETE "$B/api/admin/cms/about" -H "Authorization: Bearer $ADMIN_TOKEN")"
+code "$B/api/public/config" >/dev/null
+check "deleted about is empty" "" "$(field "d['about_us']")"
+check "cms restore about" 200 "$(code -X PUT "$B/api/admin/cms/about" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"About Us","content":"# About\n\nRestored for the smoke test."}')"
+
+printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d > /tmp/smoke-icon.png
+check "branding icon upload" 201 "$(code -X POST "$B/api/admin/branding/icon" -H "Authorization: Bearer $ADMIN_TOKEN" -F 'icon=@/tmp/smoke-icon.png;type=image/png')"
+ICON_URL=$(field "d['app_icon_url']")
+check "branding icon path" "yes" "$(echo "$ICON_URL" | grep -Eq '^/uploads/branding/.+\.png$' && echo yes || echo no)"
+code "$B/api/public/config" >/dev/null
+check "public config exposes icon" "$ICON_URL" "$(field "d['app_icon_url']")"
+check "branding icon delete" 200 "$(code -X DELETE "$B/api/admin/branding/icon" -H "Authorization: Bearer $ADMIN_TOKEN")"
+code "$B/api/public/config" >/dev/null
+check "icon cleared" "" "$(field "d['app_icon_url']")"
 
 # --- crypto payments ----------------------------------------------------
 code "$B/api/auth/me" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
@@ -120,9 +170,27 @@ check "activation code stored" "$ACT_CODE" "$(field "d['user']['activation_code_
 check "reuse rejected" 409 "$(code -X POST "$B/api/auth/activate" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d "{\"activation_code\":\"$ACT_CODE\"}")"
 check "unknown code" 404 "$(code -X POST "$B/api/auth/activate" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d '{"activation_code":"TRD-AAAA-BBBB"}')"
 
+# --- per-user trade settings -------------------------------------------
+check "trade settings require auth" 401 "$(code "$B/api/user/trade-settings")"
+check "trade settings read" 200 "$(code "$B/api/user/trade-settings" -H "Authorization: Bearer $USER_TOKEN")"
+check "default binary confidence" 70 "$(field "d['settings']['binary_min_confidence']")"
+check "trade settings update" 200 "$(code -X PUT "$B/api/user/trade-settings" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d '{"binary_min_confidence":85,"binary_duration_seconds":180,"binary_strategy":"London only","forex_min_confidence":90,"forex_timeframe":"1H","forex_strategy":"SMC continuation"}')"
+check "saved binary confidence" 85 "$(field "d['settings']['binary_min_confidence']")"
+check "saved binary duration" 180 "$(field "d['settings']['binary_duration_seconds']")"
+check "saved binary strategy" "London only" "$(field "d['settings']['binary_strategy']")"
+check "saved forex timeframe" 1H "$(field "d['settings']['forex_timeframe']")"
+check "trade settings clamped" 200 "$(code -X PUT "$B/api/user/trade-settings" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d '{"binary_min_confidence":10,"binary_duration_seconds":7,"forex_timeframe":"9H"}')"
+check "confidence clamped to 50" 50 "$(field "d['settings']['binary_min_confidence']")"
+check "invalid duration ignored" 180 "$(field "d['settings']['binary_duration_seconds']")"
+check "invalid timeframe ignored" 1H "$(field "d['settings']['forex_timeframe']")"
+check "empty trade update rejected" 400 "$(code -X PUT "$B/api/user/trade-settings" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d '{}')"
+
 # analyze now passes the gate (Gemini itself fails with the dummy key, so expect 5xx, not 403)
-ANALYZE_CODE=$(code -X POST "$B/api/analyze-chart" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d "{\"imageBase64\":\"$(python3 -c 'print("A"*400)')\"}")
+ANALYZE_CODE=$(code -X POST "$B/api/analyze-chart" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d "{\"mode\":\"BINARY\",\"imageBase64\":\"$(python3 -c 'print("A"*400)')\"}")
 check "analyze passes activation gate" "yes" "$([ "$ANALYZE_CODE" != "403" ] && [ "$ANALYZE_CODE" != "401" ] && echo yes || echo no)"
+FOREX_CODE=$(code -X POST "$B/api/analyze-chart" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d "{\"mode\":\"FOREX\",\"min_confidence\":80,\"user_custom_strategy\":\"smoke\",\"imageBase64\":\"$(python3 -c 'print("A"*400)')\"}")
+check "forex mode accepted" "yes" "$([ "$FOREX_CODE" != "403" ] && [ "$FOREX_CODE" != "401" ] && [ "$FOREX_CODE" != "400" ] && echo yes || echo no)"
+check "invalid image still rejected" 400 "$(code -X POST "$B/api/analyze-chart" -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' -d '{"mode":"FOREX","imageBase64":"short"}')"
 
 # --- plans CRUD ---------------------------------------------------------
 check "create plan" 201 "$(code -X POST "$B/api/admin/plans" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"name":"VIP Plan","plan_type":"PAID","price":99.5,"duration_days":90,"description":"VIP","features":["A","B"],"is_active":true}')"

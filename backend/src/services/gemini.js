@@ -4,117 +4,333 @@ import { buildKnowledgePrompt, getActiveKnowledge } from './knowledge.js';
 
 const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
 
-const RESPONSE_SCHEMA = {
-  type: SchemaType.OBJECT,
-  properties: {
-    signal: {
-      type: SchemaType.STRING,
-      enum: ['BUY', 'SELL', 'NO_TRADE'],
-      description: 'Trading signal for the next candle.',
+export const ANALYSIS_MODES = ['BINARY', 'FOREX'];
+
+const SIGNAL_ENUM = ['BUY', 'SELL', 'WAIT'];
+const CANDLE_ENTRY_ENUM = ['RUNNING_CANDLE', 'NEXT_CANDLE'];
+
+const MODE_SCHEMAS = {
+  BINARY: {
+    type: SchemaType.OBJECT,
+    properties: {
+      mode: { type: SchemaType.STRING, enum: ['BINARY'], description: 'Always "BINARY".' },
+      signal: {
+        type: SchemaType.STRING,
+        enum: SIGNAL_ENUM,
+        description: 'BUY, SELL or WAIT for the selected candle entry.',
+      },
+      confidence: { type: SchemaType.INTEGER, description: 'Confidence 0-100.' },
+      asset: { type: SchemaType.STRING, description: 'Instrument printed on the chart, e.g. "EUR/USD (OTC)".' },
+      candle_entry: {
+        type: SchemaType.STRING,
+        enum: CANDLE_ENTRY_ENUM,
+        description:
+          'RUNNING_CANDLE when the trade is a continuation of the candle currently forming, NEXT_CANDLE when the entry is at the open of the next candle.',
+      },
+      duration_seconds: {
+        type: SchemaType.INTEGER,
+        description: 'Binary expiry in seconds, e.g. 60 or 300.',
+      },
+      expiry_label: { type: SchemaType.STRING, description: 'Human expiry label such as "1 Minute (60s)".' },
+      entry_time: {
+        type: SchemaType.STRING,
+        description: 'Either "Immediate" (running candle) or "Next Candle Open", or a local HH:MM time.',
+      },
+      reason: { type: SchemaType.STRING, description: 'One short technical reason, max ~160 characters.' },
+      voice_summary: {
+        type: SchemaType.STRING,
+        description: 'One spoken sentence naming signal, asset, candle target, duration and confidence.',
+      },
     },
-    confidence: {
-      type: SchemaType.INTEGER,
-      description: 'Confidence in the signal, 0-100.',
-    },
-    entry_time: {
-      type: SchemaType.STRING,
-      description:
-        'Exactly "Next Candle" for an immediate entry, otherwise a specific local time in 24h HH:MM format such as "14:35".',
-    },
-    asset: {
-      type: SchemaType.STRING,
-      description: 'Instrument visible in the screenshot, e.g. "EUR/USD". Use "unknown" if it is not readable.',
-    },
-    timeframe: {
-      type: SchemaType.STRING,
-      description: 'Detected chart timeframe, e.g. "1M", "5M", "15M". Use "unknown" if it is not readable.',
-    },
-    reason: {
-      type: SchemaType.STRING,
-      description: 'One short, clear technical reason for the decision.',
-    },
-    voice_summary: {
-      type: SchemaType.STRING,
-      description:
-        'One natural spoken sentence for text-to-speech, e.g. "Buy signal detected with 85 percent confidence."',
-    },
+    required: [
+      'mode',
+      'signal',
+      'confidence',
+      'asset',
+      'candle_entry',
+      'duration_seconds',
+      'expiry_label',
+      'entry_time',
+      'reason',
+      'voice_summary',
+    ],
   },
-  required: [
-    'signal',
-    'confidence',
-    'entry_time',
-    'asset',
-    'timeframe',
-    'reason',
-    'voice_summary',
-  ],
+  FOREX: {
+    type: SchemaType.OBJECT,
+    properties: {
+      mode: { type: SchemaType.STRING, enum: ['FOREX'], description: 'Always "FOREX".' },
+      signal: {
+        type: SchemaType.STRING,
+        enum: SIGNAL_ENUM,
+        description: 'BUY, SELL or WAIT for the selected candle entry.',
+      },
+      confidence: { type: SchemaType.INTEGER, description: 'Confidence 0-100.' },
+      asset: { type: SchemaType.STRING, description: 'Instrument printed on the chart, e.g. "XAU/USD".' },
+      timeframe: { type: SchemaType.STRING, description: 'Chart timeframe, e.g. "1M", "5M", "15M", "1H", "4H".' },
+      candle_entry: {
+        type: SchemaType.STRING,
+        enum: CANDLE_ENTRY_ENUM,
+        description:
+          'RUNNING_CANDLE when the trade is a continuation of the candle currently forming, NEXT_CANDLE when the entry is at the open of the next candle.',
+      },
+      entry_price: { type: SchemaType.STRING, description: 'Entry price as a decimal string, e.g. "2645.50".' },
+      stop_loss: { type: SchemaType.STRING, description: 'Stop-loss price as a decimal string, e.g. "2638.00".' },
+      take_profit: { type: SchemaType.STRING, description: 'Take-profit price as a decimal string, e.g. "2660.00".' },
+      reason: { type: SchemaType.STRING, description: 'One short technical reason, max ~160 characters.' },
+      voice_summary: {
+        type: SchemaType.STRING,
+        description: 'One spoken sentence naming signal, asset, timeframe, candle target and confidence.',
+      },
+    },
+    required: [
+      'mode',
+      'signal',
+      'confidence',
+      'asset',
+      'timeframe',
+      'candle_entry',
+      'entry_price',
+      'stop_loss',
+      'take_profit',
+      'reason',
+      'voice_summary',
+    ],
+  },
 };
 
-const BASE_SYSTEM_INSTRUCTION = `You are an expert intraday price-action trading assistant embedded in a floating Android overlay.
-You receive a screenshot of a live candlestick chart and must decide the next actionable signal.
+const CHART_READING_RULES = `HOW TO READ THE CHART (follow this order every time)
+1. MARKET STRUCTURE: identify the most recent swing highs and swing lows. Higher highs + higher lows = bullish structure. Lower highs + lower lows = bearish structure. A range = no structure.
+2. CANDLE SEQUENCE: compare the last 5-8 candles. Count consecutive green (bullish) versus red (bearish) closes, body size and expansion/contraction. Rising bodies in one colour mean that side is in control now — do not fight the current impulse unless there is clear exhaustion.
+3. CANDLE ANATOMY: long lower wicks = buyers defending; long upper wicks = sellers defending; small indecision bodies = no edge.
+4. SUPPORT / RESISTANCE: locate the levels price has reacted to at least twice in the visible window, plus round numbers and the visible session high/low.
+5. TREND AND INDICATORS: if any moving average, Bollinger Band, RSI, MACD or volume is visible, use it as confirmation only. Never invent an indicator that is not drawn on the chart.
+6. MOMENTUM: the most recent impulse leg tells you the current direction. Price above the recent swing low and making higher lows is bullish, even if a single candle is red.
 
-ABSOLUTE OUTPUT RULES
-1. Never ask questions, never request clarification, never apologise.
-2. Never reply with prose. Output only the JSON object described by the response schema.
-3. signal must be exactly one of BUY, SELL or NO_TRADE.
-4. If the chart is unclear, the timeframe is unreadable, or the knowledge base rules are not met, return NO_TRADE with a low confidence.
-5. confidence must be a plain integer between 0 and 100.
-6. entry_time is exactly "Next Candle" when the entry is immediate, otherwise a specific local time in 24h HH:MM format (for example "14:35").
-7. asset is the instrument printed on the chart (for example "EUR/USD"), or "unknown" when it cannot be read.
-8. timeframe is the chart interval shown (for example "1M", "5M", "15M"), or "unknown" when it cannot be read.
-9. reason is one short technical line (max ~140 characters) naming the setup or the blocking condition.
-10. voice_summary is one natural sentence suitable for text-to-speech, naming the signal and the confidence percentage (for example "Buy signal detected with 85 percent confidence.").
-11. Emit every field every time, in the exact order defined by the schema. Never omit a field and never add extra fields.
+DECISION RULES — THIS IS WHERE MOST MODELS FAIL, SO BE STRICT
+- Direction must come from the evidence above, not from a default. Never default to SELL and never default to the next candle.
+- If the last 2-3 candles are strongly bullish and price is above support, a BUY on RUNNING_CANDLE or NEXT_CANDLE is correct; do not call it bearish because a resistance level exists far above.
+- If the last 2-3 candles are strongly bearish and price is below resistance, SELL is correct.
+- Signal against the immediate momentum is only allowed when price is rejecting a major level with a clear reversal pattern (engulfing, pin bar, double top/bottom, CHoCH).
+- If the structure and the last candles disagree, or the chart is unclear/too zoomed, return WAIT with a low confidence. A confident WAIT is better than a wrong BUY/SELL.
+- CANDLE ENTRY: use RUNNING_CANDLE when the current candle is already moving in the signal direction with momentum and the expiry fits inside its remaining time. Use NEXT_CANDLE when the setup is a reversal or breakout that needs the next candle's open/close confirmation.
+- Confidence must reflect confluence: 85-95 = strong trend + level + trigger; 70-84 = good setup with one missing confirmation; 50-69 = weak; below 50 = WAIT.
+- Entry, stop-loss and take-profit must be actual price levels read from the chart's price axis (forex mode). Stop loss goes beyond the structure that invalidates the idea; take profit goes toward the next level. Risk:reward must be at least 1:1.5 for a BUY or SELL.`;
 
-DECISION PROCESS
-- Read the visible candles, wicks, trend, support/resistance, volume if shown, and the detected timeframe.
-- Apply the global trading knowledge base below first. Where it is silent, use standard price-action and candlestick logic.
-- Do not invent indicators that are not visible in the screenshot.
-- Treat the supplied local time and timezone as the trader's clock for any timed entry.`;
+const OUTPUT_RULES = `ABSOLUTE OUTPUT RULES
+1. Never ask questions, never apologise, never write prose. Output only the JSON object required by the response schema.
+2. signal must be exactly BUY, SELL or WAIT.
+3. confidence must be a plain integer 0-100.
+4. candle_entry must be exactly RUNNING_CANDLE or NEXT_CANDLE.
+5. reason is one short technical sentence (max ~160 characters) that names the setup or the blocking condition.
+6. voice_summary is one natural sentence for text-to-speech that a trader can understand without looking at the screen. Use "Euro U S D" instead of "EUR/USD" and "Gold" instead of "XAU/USD".
+7. Emit every required field, in the schema order, with no extra fields.`;
 
-const SIGNAL_LABELS = { BUY: 'Buy', SELL: 'Sell', NO_TRADE: 'No-trade' };
+const BINARY_INSTRUCTIONS = `You are an expert binary-options price-action analyst embedded in a floating Android overlay. You receive a screenshot of a live candlestick chart and must return the single highest-probability trade for a short expiry.
+
+BINARY RULES
+- Expiry is short (5s to 300s). The trade must be decided by the CURRENT impulse and the level price is reacting to, not by a long-term forecast.
+- Prefer continuation with the last 2-3 candle direction when price is not at a strong opposing level.
+- Prefer reversal only at a validated support/resistance with a rejection candle or a liquidity sweep.
+- duration_seconds should match the momentum: 5-60s for a fast 1M impulse, 180-300s for a slower 5M setup. If the user supplied a preferred duration, use it.
+- expiry_label must describe duration_seconds, e.g. "1 Minute (60s)" or "5 Minutes (300s)".
+- entry_time: "Immediate" for RUNNING_CANDLE, "Next Candle Open" for NEXT_CANDLE.
+- If the asset is not readable use "unknown"; never invent a broker or pair.`;
+
+const FOREX_INSTRUCTIONS = `You are an expert forex, gold and index intraday analyst embedded in a floating Android overlay. You receive a screenshot of a live candlestick chart and must return a complete, risk-managed trade plan.
+
+FOREX RULES
+- Read the timeframe from the chart and use the matching structure: lower timeframes for entry, the visible higher structure for bias.
+- Use Smart Money Concepts when they are visible: order blocks, fair value gaps, liquidity sweeps, BOS/CHoCH. Otherwise use classic support/resistance and trend continuation.
+- entry_price, stop_loss and take_profit must be plausible prices taken from the chart axis, with the same decimals the instrument uses.
+- For a BUY: stop_loss below the invalidation low, take_profit above entry toward the next resistance. For a SELL: the reverse.
+- If the setup does not offer at least 1:1.5 risk-to-reward, return WAIT.
+- timeframe is the chart interval as printed (1M, 5M, 15M, 1H, 4H). If unreadable, use "unknown".
+- WAIT is required when price is mid-range with no clear level, or when the structure and momentum conflict.`;
+
+export function normalizeMode(value) {
+  const mode = String(value ?? '').trim().toUpperCase();
+  return ANALYSIS_MODES.includes(mode) ? mode : 'BINARY';
+}
+
+const SIGNAL_LABELS = { BUY: 'Buy', SELL: 'Sell', WAIT: 'Wait' };
 const CLOCK_PATTERN = /^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$/;
+const ALLOWED_DURATIONS = [5, 15, 30, 60, 180, 300];
+const ALLOWED_TIMEFRAMES = ['1M', '5M', '15M', '1H', '4H'];
 
 function compact(value, maxLength) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
 }
 
-function normalizeEntryTime(value) {
-  const raw = compact(value, 32);
-  if (/^next\s*candle$/i.test(raw)) return 'Next Candle';
-  const clock = CLOCK_PATTERN.exec(raw);
-  if (clock) return `${clock[1].padStart(2, '0')}:${clock[2]}`;
-  return 'Next Candle';
+function normalizeSignal(raw) {
+  const value = String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  if (value === 'NO_TRADE' || value === 'NOTRADE' || value === 'HOLD' || value === 'NONE') return 'WAIT';
+  if (SIGNAL_ENUM.includes(value)) return value;
+  if (value === 'LONG') return 'BUY';
+  if (value === 'SHORT') return 'SELL';
+  return null;
 }
 
-function validateAnalysis(raw) {
+function normalizeCandleEntry(raw) {
+  const value = String(raw ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  if (value === 'RUNNING_CANDLE' || value === 'CURRENT_CANDLE' || value === 'RUNNING') return 'RUNNING_CANDLE';
+  if (value === 'NEXT_CANDLE' || value === 'NEXT' || value === 'NEXT_CANDLE_OPEN') return 'NEXT_CANDLE';
+  return null;
+}
+
+function normalizeEntryTime(value, candleEntry) {
+  const raw = compact(value, 32);
+  if (/^immediate$/i.test(raw)) return 'Immediate';
+  if (/^next\s*candle/i.test(raw)) return 'Next Candle Open';
+  const clock = CLOCK_PATTERN.exec(raw);
+  if (clock) return `${clock[1].padStart(2, '0')}:${clock[2]}`;
+  return candleEntry === 'RUNNING_CANDLE' ? 'Immediate' : 'Next Candle Open';
+}
+
+function normalizeDuration(value, preferred) {
+  const requested = Number(preferred);
+  if (Number.isFinite(requested) && ALLOWED_DURATIONS.includes(Math.round(requested))) {
+    return Math.round(requested);
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 60;
+  const rounded = Math.round(parsed);
+  if (ALLOWED_DURATIONS.includes(rounded)) return rounded;
+  // Snap an unexpected duration to the nearest allowed value inside 5s-300s.
+  const nearest = ALLOWED_DURATIONS.reduce(
+    (best, candidate) => (Math.abs(candidate - rounded) < Math.abs(best - rounded) ? candidate : best),
+    ALLOWED_DURATIONS[0],
+  );
+  return Math.min(300, Math.max(5, rounded > 300 ? nearest : nearest));
+}
+
+function expiryLabelFor(seconds) {
+  const minutes = seconds / 60;
+  if (seconds < 60) return `${seconds} Seconds (${seconds}s)`;
+  const label = Number.isInteger(minutes) ? `${minutes} Minute` : `${minutes.toFixed(1)} Minute`;
+  return `${label}${minutes === 1 ? '' : 's'} (${seconds}s)`;
+}
+
+function priceString(value, fallback = '—') {
+  const raw = compact(value, 24);
+  if (!raw) return fallback;
+  const numeric = Number(raw.replace(/[^0-9.-]/g, ''));
+  if (!Number.isFinite(numeric)) return fallback;
+  // Keep the precision the model used when it is a clean decimal.
+  if (/^-?\d+(\.\d+)?$/.test(raw)) return raw;
+  return String(numeric);
+}
+
+function normalizeTimeframe(value, fallback = '15M') {
+  const raw = compact(value, 8).toUpperCase().replace(/\s+/g, '');
+  const mapped = raw === '1MIN' ? '1M' : raw === '5MIN' ? '5M' : raw === '15MIN' ? '15M' : raw;
+  if (ALLOWED_TIMEFRAMES.includes(mapped)) return mapped;
+  if (/^H1$/.test(mapped)) return '1H';
+  if (/^H4$/.test(mapped)) return '4H';
+  return ALLOWED_TIMEFRAMES.includes(String(fallback).toUpperCase())
+    ? String(fallback).toUpperCase()
+    : '15M';
+}
+
+function spokenAsset(asset) {
+  return String(asset)
+    .replace(/\(OTC\)/gi, 'OTC')
+    .replace(/XAU\/USD/gi, 'Gold')
+    .replace(/XAG\/USD/gi, 'Silver')
+    .replace(/\//g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function spokenCandle(candleEntry) {
+  return candleEntry === 'RUNNING_CANDLE' ? 'Running Candle' : 'Next Candle';
+}
+
+function spokenTimeframe(timeframe) {
+  const map = { '1M': '1 minute', '5M': '5 minute', '15M': '15 minute', '1H': '1 hour', '4H': '4 hour' };
+  return map[timeframe] || timeframe;
+}
+
+/**
+ * Validates and normalizes the model JSON into the exact public contract for
+ * the requested mode. Anything missing is repaired from the chart context, and
+ * the response is never returned unvalidated.
+ */
+export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDuration = null }) {
   if (!raw || typeof raw !== 'object') throw new Error('Model returned no JSON object');
 
-  const signal = String(raw.signal || '').trim().toUpperCase().replace(/\s+/g, '_');
-  if (!['BUY', 'SELL', 'NO_TRADE'].includes(signal)) {
-    throw new Error(`Model returned an invalid signal: ${raw.signal}`);
-  }
+  const resolvedMode = normalizeMode(raw.mode || mode);
+  const signal = normalizeSignal(raw.signal);
+  if (!signal) throw new Error(`Model returned an invalid signal: ${raw.signal}`);
 
   const confidenceRaw = Number(raw.confidence);
   const confidence = Number.isFinite(confidenceRaw)
     ? Math.max(0, Math.min(100, Math.round(confidenceRaw)))
     : 0;
 
-  const entryTime = normalizeEntryTime(raw.entry_time ?? raw.entry_timing);
-  const asset = compact(raw.asset, 32) || 'unknown';
-  const timeframe = compact(raw.timeframe ?? raw.timeframe_detected, 16) || 'unknown';
+  const candleEntry =
+    normalizeCandleEntry(raw.candle_entry ?? raw.candle_target ?? raw.entry_candle) ||
+    (signal === 'BUY' || signal === 'SELL' ? 'NEXT_CANDLE' : 'RUNNING_CANDLE');
+
+  const asset = compact(raw.asset, 48) || 'unknown';
   const reason = compact(raw.reason, 240) || 'No clear setup detected.';
+  const threshold = Math.max(0, Math.min(100, Math.round(Number(minConfidence) || 0)));
+
+  // Threshold rule: a signal that does not meet the trader's minimum confidence
+  // becomes an explicit WAIT, with the spoken line the app promises.
+  const finalSignal = signal === 'WAIT' || confidence < threshold ? 'WAIT' : signal;
+  const thresholdApplied = finalSignal === 'WAIT' && signal !== 'WAIT';
+
+  const base = {
+    mode: resolvedMode,
+    signal: finalSignal,
+    confidence,
+    asset,
+    candle_entry: candleEntry,
+    reason: thresholdApplied
+      ? `${reason} (confidence ${confidence}% is below your ${threshold}% threshold)`.slice(0, 260)
+      : reason,
+  };
+
+  if (resolvedMode === 'BINARY') {
+    const durationSeconds = normalizeDuration(raw.duration_seconds ?? raw.duration, preferredDuration);
+    const voiceSummary =
+      thresholdApplied || finalSignal === 'WAIT'
+        ? 'Wait, market confidence is below your threshold.'
+        : compact(raw.voice_summary, 240) ||
+          `Binary ${SIGNAL_LABELS[finalSignal]} signal on ${spokenAsset(asset)}, ${spokenCandle(
+            candleEntry,
+          )}, ${durationSeconds} seconds, confidence ${confidence} percent.`;
+
+    return {
+      ...base,
+      duration_seconds: durationSeconds,
+      expiry_label: compact(raw.expiry_label, 48) || expiryLabelFor(durationSeconds),
+      entry_time: normalizeEntryTime(raw.entry_time, candleEntry),
+      voice_summary: voiceSummary,
+    };
+  }
+
+  const timeframe = normalizeTimeframe(raw.timeframe ?? raw.timeframe_detected, '15M');
   const voiceSummary =
-    compact(raw.voice_summary, 240) ||
-    `${SIGNAL_LABELS[signal]} signal detected with ${confidence} percent confidence.`;
+    thresholdApplied || finalSignal === 'WAIT'
+      ? 'Wait, market confidence is below your threshold.'
+      : compact(raw.voice_summary, 240) ||
+        `Forex ${SIGNAL_LABELS[finalSignal]} signal on ${spokenAsset(asset)}, ${spokenTimeframe(
+          timeframe,
+        )} timeframe, confidence ${confidence} percent.`;
 
   return {
-    signal,
-    confidence,
-    entry_time: entryTime,
-    asset,
+    ...base,
     timeframe,
-    reason,
+    entry_price: priceString(raw.entry_price),
+    stop_loss: priceString(raw.stop_loss),
+    take_profit: priceString(raw.take_profit),
     voice_summary: voiceSummary,
   };
 }
@@ -238,18 +454,11 @@ async function discoverModels() {
  */
 async function buildModelChain() {
   const discovered = await discoverModels();
-  const chain = [
-    config.gemini.model,
-    lastGoodModel,
-    ...PREFERRED_MODELS,
-    ...discovered,
-  ]
+  const chain = [config.gemini.model, lastGoodModel, ...PREFERRED_MODELS, ...discovered]
     .map((name) => String(name || '').trim())
     .filter(Boolean);
 
   const unique = [...new Set(chain)];
-  // Skip models that just failed; if they all failed, retry them rather than
-  // returning no model at all.
   const healthy = unique.filter((name) => !isCoolingDown(name));
   return (healthy.length ? healthy : unique).slice(0, config.gemini.maxModelAttempts);
 }
@@ -323,7 +532,6 @@ function parseModelJson(text) {
   try {
     return JSON.parse(text);
   } catch {
-    // Defensive parse: strip fences if the model still wrapped the JSON.
     const match = text.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('Model returned a non-JSON response');
     return JSON.parse(match[0]);
@@ -331,15 +539,45 @@ function parseModelJson(text) {
 }
 
 /**
- * Runs the vision analysis against the active knowledge base and returns the
- * strictly validated structured signal. Models are tried in order (configured
- * model first, then every other available Gemini model) until one answers, so
- * a retired, overloaded, rate-limited or schema-incompatible model never takes
- * the endpoint down.
+ * Runs the vision analysis for one mode against that mode's knowledge base and
+ * returns the strict structured signal. Models are tried in order until one
+ * answers, so a retired, overloaded, rate-limited or schema-incompatible model
+ * never takes the endpoint down.
  */
-export async function analyzeChart({ imageBase64, mimeType, currentTime, timezone }) {
-  const activeEntries = await getActiveKnowledge();
+export async function analyzeChart({
+  imageBase64,
+  mimeType,
+  currentTime,
+  timezone,
+  mode,
+  userCustomStrategy,
+  minConfidence,
+  preferredDuration,
+  preferredTimeframe,
+}) {
+  const resolvedMode = normalizeMode(mode);
+  const activeEntries = await getActiveKnowledge(resolvedMode);
   const knowledgeBlock = buildKnowledgePrompt(activeEntries);
+  const custom = compact(userCustomStrategy, 4000);
+  const threshold = Math.max(0, Math.min(100, Math.round(Number(minConfidence) || 0)));
+
+  const modeInstruction = resolvedMode === 'BINARY' ? BINARY_INSTRUCTIONS : FOREX_INSTRUCTIONS;
+  const preferred =
+    resolvedMode === 'BINARY'
+      ? `Preferred expiry: ${preferredDuration ? `${preferredDuration} seconds` : 'trader default (60s)'}.`
+      : `Preferred timeframe: ${normalizeTimeframe(preferredTimeframe, '15M')}.`;
+
+  const systemInstruction = [
+    modeInstruction,
+    CHART_READING_RULES,
+    OUTPUT_RULES,
+    `MODE: ${resolvedMode}. ${preferred}`,
+    `MINIMUM CONFIDENCE: ${threshold}%. If your confidence is lower than ${threshold}%, return WAIT.`,
+    custom
+      ? `TRADER'S CUSTOM STRATEGY (apply in addition to the library, never contradict the risk rules):\n${custom}`
+      : 'TRADER CUSTOM STRATEGY: none supplied.',
+    `MODE-SPECIFIC KNOWLEDGE BASE (authoritative, ${activeEntries.length} active ${resolvedMode} entries):\n${knowledgeBlock}`,
+  ].join('\n\n');
 
   const models = await buildModelChain();
   const deadline = Date.now() + config.gemini.timeoutMs;
@@ -355,13 +593,13 @@ export async function analyzeChart({ imageBase64, mimeType, currentTime, timezon
 
     const model = genAI.getGenerativeModel({
       model: modelName,
-      systemInstruction: `${BASE_SYSTEM_INSTRUCTION}\n\nGLOBAL TRADING KNOWLEDGE BASE (authoritative, ${activeEntries.length} active entries):\n${knowledgeBlock}`,
+      systemInstruction,
       generationConfig: {
         temperature: 0.2,
         topP: 0.9,
         maxOutputTokens: 2048,
         responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
+        responseSchema: MODE_SCHEMAS[resolvedMode],
       },
     });
 
@@ -369,25 +607,26 @@ export async function analyzeChart({ imageBase64, mimeType, currentTime, timezon
     try {
       const result = await withTimeout(
         model.generateContent([
+          { inlineData: { mimeType, data: imageBase64 } },
           {
-            inlineData: {
-              mimeType,
-              data: imageBase64,
-            },
-          },
-          {
-            text: `Analyse this chart screenshot.
+            text: `Analyse this chart screenshot for a ${resolvedMode} trade.
 Trader local time: ${currentTime || 'unknown'}
 Trader timezone: ${timezone || 'unknown'}
+Minimum confidence: ${threshold}%
+${resolvedMode === 'BINARY' ? `Preferred duration: ${preferredDuration || 60} seconds` : `Preferred timeframe: ${normalizeTimeframe(preferredTimeframe, '15M')}`}
 
-Return the JSON decision now.`,
+Read the candles and structure first, then return the JSON decision now.`,
           },
         ]),
         Math.min(remaining, config.gemini.attemptTimeoutMs),
       );
 
       const parsed = parseModelJson(result.response.text());
-      const analysis = validateAnalysis(parsed);
+      const analysis = validateAnalysis(parsed, {
+        mode: resolvedMode,
+        minConfidence: threshold,
+        preferredDuration,
+      });
       lastGoodModel = modelName;
       modelCooldown.delete(modelName);
       return {
@@ -409,7 +648,6 @@ Return the JSON decision now.`,
   }
 
   if (lastError?.code === 'GEMINI_TIMEOUT') throw lastError;
-
   if (lastError?.status) throw lastError;
 
   throw analysisError(

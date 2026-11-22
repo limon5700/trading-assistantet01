@@ -32,9 +32,63 @@ export interface AppSettings {
   affiliate_link: string;
   support_contact_link: string;
   app_name?: string;
+  app_icon_url?: string;
+  terms_and_conditions?: string;
+  about_us?: string;
   default_plan_type?: string;
   crypto_network?: 'BEP20' | 'TRC20';
   crypto_wallet_address?: string;
+}
+
+export interface PublicConfig {
+  app_name: string;
+  app_icon_url: string;
+  terms_and_conditions: string;
+  terms_title: string;
+  about_us: string;
+  about_title: string;
+  affiliate_link: string;
+  support_contact_link: string;
+  plans: Plan[];
+}
+
+export type SignalMode = 'BINARY' | 'FOREX';
+
+export type CandleEntry = 'RUNNING_CANDLE' | 'NEXT_CANDLE';
+
+interface AnalysisBase {
+  signal: 'BUY' | 'SELL' | 'WAIT';
+  confidence: number;
+  asset: string;
+  candle_entry: CandleEntry;
+  reason: string;
+  voice_summary: string;
+}
+
+export interface BinaryAnalysis extends AnalysisBase {
+  mode: 'BINARY';
+  duration_seconds: number;
+  expiry_label: string;
+  entry_time: string;
+}
+
+export interface ForexAnalysis extends AnalysisBase {
+  mode: 'FOREX';
+  timeframe: string;
+  entry_price: string;
+  stop_loss: string;
+  take_profit: string;
+}
+
+export type ChartAnalysis = BinaryAnalysis | ForexAnalysis;
+
+export interface TradeSettings {
+  binary_min_confidence: number;
+  binary_duration_seconds: number;
+  binary_strategy: string;
+  forex_min_confidence: number;
+  forex_timeframe: string;
+  forex_strategy: string;
 }
 
 export type PaymentStatus = 'PENDING' | 'VERIFIED' | 'FAILED';
@@ -160,6 +214,26 @@ export const userApi = {
       method: 'POST',
       token,
       body: { activation_code: activationCode },
+    });
+  },
+};
+
+export const publicApi = {
+  config(): Promise<PublicConfig> {
+    return request<PublicConfig>('/api/public/config');
+  },
+};
+
+export const tradeSettingsApi = {
+  get(token: string): Promise<{ settings: TradeSettings }> {
+    return request<{ settings: TradeSettings }>('/api/user/trade-settings', { token });
+  },
+
+  save(token: string, patch: Partial<TradeSettings>): Promise<{ settings: TradeSettings }> {
+    return request<{ settings: TradeSettings }>('/api/user/trade-settings', {
+      method: 'PUT',
+      token,
+      body: patch,
     });
   },
 };

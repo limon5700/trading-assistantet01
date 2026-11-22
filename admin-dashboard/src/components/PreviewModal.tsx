@@ -19,11 +19,16 @@ interface PreviewModalProps {
   onClose: () => void;
 }
 
+type PreviewTab = 'text' | 'pdf';
+
 export function PreviewModal({ entryId, onClose }: PreviewModalProps) {
   const toast = useToast();
   const [entry, setEntry] = useState<KnowledgeEntry | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<PreviewTab>('text');
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   useEffect(() => {
     if (entryId === null) {
@@ -36,6 +41,9 @@ export function PreviewModal({ entryId, onClose }: PreviewModalProps) {
     setLoading(true);
     setError(null);
     setEntry(null);
+    setTab('text');
+    setPdfUrl(null);
+    setPdfError(null);
 
     api
       .getKnowledge(entryId)
@@ -56,6 +64,31 @@ export function PreviewModal({ entryId, onClose }: PreviewModalProps) {
       cancelled = true;
     };
   }, [entryId, toast]);
+
+  // The original PDF is fetched as a blob so the auth header is included and
+  // the browser preview never needs a public/signed URL.
+  useEffect(() => {
+    if (!entry?.pdf_file_path) return undefined;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+
+    api
+      .getKnowledgePdf(entry.id)
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setPdfUrl(objectUrl);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setPdfError(err instanceof ApiError ? err.message : 'Could not load the stored PDF.');
+      });
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [entry?.id, entry?.pdf_file_path]);
 
   const pages = entry ? splitPages(entry.content) : [];
 
@@ -88,6 +121,23 @@ export function PreviewModal({ entryId, onClose }: PreviewModalProps) {
         </p>
       ) : entry ? (
         <div className="space-y-4">
+          {entry.pdf_file_path ? (
+            <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
+              {(['text', 'pdf'] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setTab(value)}
+                  className={`flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                    tab === value ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  {value === 'text' ? 'Extracted text' : 'Stored PDF'}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
             <TypeBadge type={entry.source_type} />
             <span
@@ -102,7 +152,23 @@ export function PreviewModal({ entryId, onClose }: PreviewModalProps) {
             <span>Created {new Date(entry.created_at.replace(' ', 'T') + 'Z').toLocaleString()}</span>
           </div>
 
-          {pages.length > 1 ? (
+          {tab === 'pdf' && entry.pdf_file_path ? (
+            pdfError ? (
+              <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {pdfError}
+              </p>
+            ) : pdfUrl ? (
+              <iframe
+                title={`PDF preview of ${entry.title}`}
+                src={pdfUrl}
+                className="h-[60vh] w-full rounded-lg border border-slate-200"
+              />
+            ) : (
+              <div className="flex items-center justify-center py-12">
+                <span className="h-6 w-6 animate-spin rounded-full border-2 border-slate-200 border-t-brand-600" />
+              </div>
+            )
+          ) : pages.length > 1 ? (
             <div className="space-y-4">
               {pages.map((page, index) => (
                 <section key={index} className="rounded-lg border border-slate-200">

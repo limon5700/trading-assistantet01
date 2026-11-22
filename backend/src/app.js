@@ -9,6 +9,10 @@ import adminRoutes from './routes/admin.js';
 import knowledgeRoutes from './routes/knowledge.js';
 import analyzeRoutes from './routes/analyze.js';
 import paymentRoutes from './routes/payments.js';
+import publicRoutes from './routes/public.js';
+import tradeSettingsRoutes from './routes/tradeSettings.js';
+import adminContentRoutes from './routes/adminContent.js';
+import { ensureUploadDirs } from './services/uploads.js';
 
 export function createApp() {
   const app = express();
@@ -36,9 +40,22 @@ export function createApp() {
   app.use(express.urlencoded({ extended: false, limit: '1mb' }));
   app.use(cookieParser());
 
+  // Persisted branding icons and knowledge PDFs are served from here so the
+  // mobile app and dashboard can preview them without extra auth hops.
+  void ensureUploadDirs().catch((error) => {
+    console.warn(`[uploads] could not create ${config.uploads.dir}: ${error?.message || error}`);
+  });
+  app.use(
+    config.uploads.publicPath,
+    express.static(config.uploads.dir, { maxAge: '1h', fallthrough: true, index: false }),
+  );
+
   app.get('/api/health', (req, res) => {
     res.json({ ok: true, service: 'ai-trading-backend', time: new Date().toISOString() });
   });
+
+  // Public branding, legal pages and plans for the mobile app.
+  app.use('/api/public', publicRoutes);
 
   // App users: signup, login, session, activation codes.
   app.use('/api/auth', userAuthRoutes);
@@ -46,7 +63,11 @@ export function createApp() {
   // Admin: login/session (authRoutes) plus the management endpoints.
   app.use('/api/admin', authRoutes);
   app.use('/api/admin/knowledge', requireAdmin, knowledgeRoutes);
+  app.use('/api/admin', requireAdmin, adminContentRoutes);
   app.use('/api/admin', requireAdmin, adminRoutes);
+
+  // Per-user binary / forex trade preferences.
+  app.use('/api/user', tradeSettingsRoutes);
 
   // Crypto (USDT) payment intents and on-chain verification.
   app.use('/api/payments', paymentRoutes);

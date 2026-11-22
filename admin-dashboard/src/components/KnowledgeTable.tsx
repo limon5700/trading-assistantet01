@@ -31,6 +31,7 @@ export function KnowledgeTable({
         <thead>
           <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
             <th className="px-4 py-3 font-semibold">Title</th>
+            <th className="px-4 py-3 font-semibold">Category</th>
             <th className="px-4 py-3 font-semibold">Type</th>
             <th className="px-4 py-3 font-semibold">Pages</th>
             <th className="px-4 py-3 font-semibold">Created</th>
@@ -53,6 +54,11 @@ export function KnowledgeTable({
                 {item.file_name ? (
                   <p className="mt-0.5 truncate text-xs text-slate-400">{item.file_name}</p>
                 ) : null}
+              </td>
+              <td className="px-4 py-3">
+                <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-600">
+                  {item.category}
+                </span>
               </td>
               <td className="px-4 py-3">
                 <TypeBadge type={item.source_type} />

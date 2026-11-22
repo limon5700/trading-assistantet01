@@ -1,19 +1,7 @@
 import { registerPlugin } from '@capacitor/core';
+import type { ChartAnalysis, SignalMode } from './api';
 
-/** Mirrors the response contract of `POST /api/analyze-chart`. */
-export interface ChartAnalysis {
-  signal: 'BUY' | 'SELL' | 'NO_TRADE';
-  confidence: number;
-  /** `Next Candle` for an immediate entry, otherwise a local `HH:MM` time. */
-  entry_time: string;
-  /** Instrument shown on the chart, e.g. `EUR/USD` (`unknown` if unreadable). */
-  asset: string;
-  /** Chart interval, e.g. `1M`, `5M` (`unknown` if unreadable). */
-  timeframe: string;
-  reason: string;
-  /** Spoken one-sentence summary of the decision. */
-  voice_summary: string;
-}
+export type { ChartAnalysis, SignalMode };
 
 export interface OverlayPermissionState {
   /** `Settings.canDrawOverlays()` — draw over other apps. */
@@ -41,12 +29,21 @@ export interface TradingOverlayPlugin {
   requestNotificationPermission(): Promise<{ notifications: boolean }>;
   /**
    * Shows the Android screen-capture consent dialog, then starts the floating
-   * widget foreground service. Rejects when the draw-over-apps permission is
-   * missing or the user declines capture.
+   * widget foreground service in the requested mode.
    */
-  startOverlay(options: { serverUrl: string; token?: string }): Promise<StartOverlayResult>;
+  startOverlay(options: {
+    serverUrl: string;
+    token?: string;
+    mode?: SignalMode;
+  }): Promise<StartOverlayResult>;
   stopOverlay(): Promise<void>;
   updateServerUrl(options: { serverUrl: string; token?: string }): Promise<void>;
+  /** Switches BINARY / FOREX while the widget is running. */
+  setMode(options: { mode: SignalMode }): Promise<{ mode: SignalMode }>;
+  /** Turns spoken signals on/off without restarting the widget. */
+  setVoiceEnabled(options: { enabled: boolean }): Promise<{ enabled: boolean }>;
+  /** Speaks a short confirmation so the user can verify TTS works. */
+  testVoice(options?: { text?: string }): Promise<void>;
   /** Forces an immediate screenshot + analysis cycle. */
   analyzeNow(): Promise<void>;
   addListener(
@@ -55,7 +52,7 @@ export interface TradingOverlayPlugin {
   ): Promise<{ remove: () => Promise<void> }>;
   addListener(
     eventName: 'overlayState',
-    listener: (payload: { running: boolean }) => void,
+    listener: (payload: { running: boolean; mode?: SignalMode }) => void,
   ): Promise<{ remove: () => Promise<void> }>;
   addListener(
     eventName: 'overlayError',

@@ -4,6 +4,9 @@ import type {
   ActivityAction,
   AdminUser,
   AppSettings,
+  Branding,
+  CmsPage,
+  KnowledgeCategory,
   KnowledgeEntry,
   KnowledgeSummary,
   LoginResponse,
@@ -13,6 +16,18 @@ import type {
   UploadResult,
   UserStats,
 } from './types';
+
+export interface PublicConfig {
+  app_name: string;
+  app_icon_url: string;
+  terms_and_conditions: string;
+  terms_title: string;
+  about_us: string;
+  about_title: string;
+  affiliate_link: string;
+  support_contact_link: string;
+  plans: Plan[];
+}
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const TOKEN_KEY = 'ai_trading_admin_token';
@@ -106,8 +121,8 @@ export const api = {
     return request('/api/admin/me');
   },
 
-  listKnowledge(): Promise<{ items: KnowledgeSummary[]; count: number }> {
-    return request('/api/admin/knowledge');
+  listKnowledge(category?: KnowledgeCategory): Promise<{ items: KnowledgeSummary[]; count: number }> {
+    return request(`/api/admin/knowledge${category ? `?category=${category}` : ''}`);
   },
 
   getKnowledge(id: number): Promise<{ item: KnowledgeEntry }> {
@@ -118,16 +133,27 @@ export const api = {
     title: string;
     content: string;
     isActive: boolean;
+    category: KnowledgeCategory;
   }): Promise<{ item: KnowledgeEntry }> {
     return request('/api/admin/knowledge/text', {
       method: 'POST',
-      body: JSON.stringify({ title: input.title, content: input.content, is_active: input.isActive }),
+      body: JSON.stringify({
+        title: input.title,
+        content: input.content,
+        is_active: input.isActive,
+        category: input.category,
+      }),
     });
   },
 
   updateKnowledge(
     id: number,
-    patch: { title?: string; content?: string; isActive?: boolean },
+    patch: {
+      title?: string;
+      content?: string;
+      isActive?: boolean;
+      category?: KnowledgeCategory;
+    },
   ): Promise<{ item: KnowledgeEntry }> {
     return request(`/api/admin/knowledge/${id}`, {
       method: 'PUT',
@@ -135,8 +161,27 @@ export const api = {
         ...(patch.title !== undefined ? { title: patch.title } : {}),
         ...(patch.content !== undefined ? { content: patch.content } : {}),
         ...(patch.isActive !== undefined ? { is_active: patch.isActive } : {}),
+        ...(patch.category !== undefined ? { category: patch.category } : {}),
       }),
     });
+  },
+
+  /** Fetches the original uploaded PDF as a blob for in-browser preview. */
+  async getKnowledgePdf(id: number): Promise<Blob> {
+    const headers = new Headers();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+
+    const response = await fetch(`${API_BASE}/api/admin/knowledge/${id}/file`, {
+      headers,
+      credentials: 'include',
+    });
+    if (response.status === 401) handleUnauthorized();
+    if (!response.ok) {
+      const text = await response.text();
+      const data = safeJson(text) as { error?: string } | null;
+      throw new ApiError(data?.error || `Could not load the PDF (${response.status})`, response.status);
+    }
+    return response.blob();
   },
 
   deleteKnowledge(id: number): Promise<{ ok: boolean; id: number }> {
@@ -151,6 +196,7 @@ export const api = {
     file: File;
     title: string;
     isActive: boolean;
+    category: KnowledgeCategory;
     onProgress?: (percent: number) => void;
   }): Promise<UploadResult> {
     return new Promise((resolve, reject) => {
@@ -158,6 +204,7 @@ export const api = {
       form.append('file', input.file);
       if (input.title.trim()) form.append('title', input.title.trim());
       form.append('is_active', String(input.isActive));
+      form.append('category', input.category);
 
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${API_BASE}/api/admin/knowledge/pdf`);
@@ -200,6 +247,34 @@ export const api = {
 
   updateSettings(patch: Partial<AppSettings>): Promise<{ settings: AppSettings }> {
     return request('/api/admin/settings', { method: 'PUT', body: JSON.stringify(patch) });
+  },
+
+  /* ------------------------------------------------------- CMS & branding -- */
+
+  listCmsPages(): Promise<{ items: CmsPage[]; slugs: string[] }> {
+    return request('/api/admin/cms');
+  },
+
+  saveCmsPage(slug: 'terms' | 'about', input: { title?: string; content: string }): Promise<{ item: CmsPage }> {
+    return request(`/api/admin/cms/${slug}`, { method: 'PUT', body: JSON.stringify(input) });
+  },
+
+  deleteCmsPage(slug: 'terms' | 'about'): Promise<{ ok: boolean; item: CmsPage }> {
+    return request(`/api/admin/cms/${slug}`, { method: 'DELETE' });
+  },
+
+  getBranding(): Promise<{ branding: Branding; public_config: PublicConfig }> {
+    return request('/api/admin/branding');
+  },
+
+  uploadBrandingIcon(file: File): Promise<{ app_icon_url: string; app_icon_full_url: string }> {
+    const form = new FormData();
+    form.append('icon', file);
+    return request('/api/admin/branding/icon', { method: 'POST', body: form });
+  },
+
+  deleteBrandingIcon(): Promise<{ app_icon_url: string; app_icon_full_url: string }> {
+    return request('/api/admin/branding/icon', { method: 'DELETE' });
   },
 
   /* --------------------------------------------------------------- plans -- */

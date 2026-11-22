@@ -6,9 +6,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
 import androidx.activity.result.ActivityResult
 import androidx.core.content.ContextCompat
 import com.getcapacitor.JSObject
@@ -19,6 +21,7 @@ import com.getcapacitor.annotation.ActivityCallback
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
+import java.util.Locale
 
 /**
  * JS bridge for the floating trading overlay.
@@ -43,6 +46,9 @@ class OverlayPlugin : Plugin() {
     }
 
     private var receiverRegistered = false
+    private var testTts: TextToSpeech? = null
+    private var testTtsReady = false
+    private var pendingTestText: String? = null
 
     private val analysisReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -57,10 +63,17 @@ class OverlayPlugin : Plugin() {
                 FloatingWidgetService.ACTION_STATE -> {
                     notifyListeners(
                         "overlayState",
-                        JSObject().put(
-                            "running",
-                            intent.getBooleanExtra(FloatingWidgetService.EXTRA_RUNNING, false),
-                        ),
+                        JSObject()
+                            .put(
+                                "running",
+                                intent.getBooleanExtra(FloatingWidgetService.EXTRA_RUNNING, false),
+                            )
+                            .put(
+                                "mode",
+                                FloatingWidgetService.normalizeMode(
+                                    intent.getStringExtra(FloatingWidgetService.EXTRA_MODE),
+                                ),
+                            ),
                     )
                 }
 
@@ -102,6 +115,10 @@ class OverlayPlugin : Plugin() {
             }
             receiverRegistered = false
         }
+        testTts?.stop()
+        testTts?.shutdown()
+        testTts = null
+        testTtsReady = false
         super.handleOnDestroy()
     }
 
@@ -192,7 +209,9 @@ class OverlayPlugin : Plugin() {
             return
         }
 
+        val mode = FloatingWidgetService.normalizeMode(call.getString("mode"))
         persistServerUrl(serverUrl)
+        persistMode(mode)
         call.getString("token")?.takeIf { it.isNotBlank() }?.let { persistUserToken(it) }
 
         val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
@@ -224,12 +243,19 @@ class OverlayPlugin : Plugin() {
 
         val serverUrl = call.getString("serverUrl")?.trim()?.trimEnd('/').orEmpty()
         val userToken = call.getString("token").orEmpty()
+        val mode = FloatingWidgetService.normalizeMode(call.getString("mode"))
+        val voiceEnabled = context.getSharedPreferences(
+            FloatingWidgetService.PREFS_NAME,
+            Context.MODE_PRIVATE,
+        ).getBoolean(FloatingWidgetService.KEY_VOICE, true)
         val intent = Intent(context, FloatingWidgetService::class.java).apply {
             action = FloatingWidgetService.ACTION_START
             putExtra(FloatingWidgetService.EXTRA_RESULT_CODE, result.resultCode)
             putExtra(FloatingWidgetService.EXTRA_RESULT_DATA, data)
             putExtra(FloatingWidgetService.EXTRA_SERVER_URL, serverUrl)
             putExtra(FloatingWidgetService.EXTRA_USER_TOKEN, userToken)
+            putExtra(FloatingWidgetService.EXTRA_MODE, mode)
+            putExtra(FloatingWidgetService.EXTRA_VOICE_ENABLED, voiceEnabled)
         }
 
         try {
@@ -276,6 +302,98 @@ class OverlayPlugin : Plugin() {
         call.resolve()
     }
 
+    /** Switches the running widget between BINARY and FOREX without restarting capture. */
+    @PluginMethod
+    fun setMode(call: PluginCall) {
+        val mode = FloatingWidgetService.normalizeMode(call.getString("mode"))
+        persistMode(mode)
+        if (FloatingWidgetService.isRunning) {
+            val intent = Intent(context, FloatingWidgetService::class.java).apply {
+                action = FloatingWidgetService.ACTION_SET_MODE
+                putExtra(FloatingWidgetService.EXTRA_MODE, mode)
+            }
+            context.startService(intent)
+        }
+        call.resolve(JSObject().put("mode", mode))
+    }
+
+    /** Toggles spoken signals for the running widget and future sessions. */
+    @PluginMethod
+    fun setVoiceEnabled(call: PluginCall) {
+        val enabled = call.getBoolean("enabled", true) ?: true
+        context.getSharedPreferences(FloatingWidgetService.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(FloatingWidgetService.KEY_VOICE, enabled)
+            .apply()
+        if (FloatingWidgetService.isRunning) {
+            val intent = Intent(context, FloatingWidgetService::class.java).apply {
+                action = FloatingWidgetService.ACTION_SET_VOICE
+                putExtra(FloatingWidgetService.EXTRA_VOICE_ENABLED, enabled)
+            }
+            context.startService(intent)
+        }
+        call.resolve(JSObject().put("enabled", enabled))
+    }
+
+    /**
+     * Speaks a fixed sentence with the same locale and audio attributes the
+     * widget uses, so the user can verify text-to-speech without starting a scan.
+     */
+    @PluginMethod
+    fun testVoice(call: PluginCall) {
+        val text = call.getString("text")?.takeIf { it.isNotBlank() }
+            ?: "Voice alerts are working. Buy signal, next candle, confidence eighty five percent."
+
+        if (testTts == null) {
+            pendingTestText = text
+            testTts = TextToSpeech(context.applicationContext) { status ->
+                if (status != TextToSpeech.SUCCESS) {
+                    testTtsReady = false
+                    pendingTestText = null
+                    android.util.Log.w(TAG, "Test text-to-speech init failed with status $status")
+                    return@TextToSpeech
+                }
+                val engine = testTts
+                val language = try {
+                    engine?.setLanguage(Locale.US) ?: TextToSpeech.LANG_NOT_SUPPORTED
+                } catch (error: Exception) {
+                    TextToSpeech.LANG_NOT_SUPPORTED
+                }
+                if (language == TextToSpeech.LANG_MISSING_DATA ||
+                    language == TextToSpeech.LANG_NOT_SUPPORTED
+                ) {
+                    engine?.setLanguage(Locale.getDefault())
+                }
+                try {
+                    engine?.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build(),
+                    )
+                } catch (ignored: Exception) {
+                    // Some engines ignore audio attributes.
+                }
+                testTtsReady = true
+                pendingTestText?.let { queued ->
+                    pendingTestText = null
+                    engine?.speak(queued, TextToSpeech.QUEUE_FLUSH, null, "VOICE_TEST")
+                }
+            }
+            call.resolve()
+            return
+        }
+
+        if (!testTtsReady) {
+            pendingTestText = text
+            call.resolve()
+            return
+        }
+
+        testTts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "VOICE_TEST")
+        call.resolve()
+    }
+
     @PluginMethod
     fun analyzeNow(call: PluginCall) {
         if (!FloatingWidgetService.isRunning) {
@@ -293,6 +411,13 @@ class OverlayPlugin : Plugin() {
         context.getSharedPreferences(FloatingWidgetService.PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(FloatingWidgetService.KEY_SERVER_URL, serverUrl)
+            .apply()
+    }
+
+    private fun persistMode(mode: String) {
+        context.getSharedPreferences(FloatingWidgetService.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(FloatingWidgetService.KEY_MODE, mode)
             .apply()
     }
 

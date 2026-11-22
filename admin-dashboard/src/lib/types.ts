@@ -1,8 +1,12 @@
+export type KnowledgeCategory = 'BINARY' | 'FOREX' | 'GENERAL';
+
 export interface KnowledgeSummary {
   id: number;
   title: string;
+  category: KnowledgeCategory;
   source_type: 'TEXT' | 'PDF';
   file_name: string | null;
+  pdf_file_path: string | null;
   page_count: number;
   is_active: boolean;
   created_at: string;
@@ -88,11 +92,26 @@ export interface AppSettings {
   affiliate_link: string;
   support_contact_link: string;
   app_name: string;
+  app_icon_url: string;
   default_plan_type: string;
   crypto_network: 'BEP20' | 'TRC20';
   crypto_wallet_address: string;
   bscscan_api_key: string;
   trongrid_api_key: string;
+}
+
+export interface CmsPage {
+  id: number;
+  slug: 'terms' | 'about';
+  title: string;
+  content: string;
+  updated_at: string;
+}
+
+export interface Branding {
+  app_name: string;
+  app_icon_url: string;
+  app_icon_full_url: string;
 }
 
 export type ActivityAction =

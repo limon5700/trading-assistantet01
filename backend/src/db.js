@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
+import { BINARY_STRATEGIES, DEFAULT_CMS_PAGES, FOREX_STRATEGIES } from './services/strategySeed.js';
 
 /**
  * Minimal dialect-agnostic database adapter.
@@ -109,27 +110,90 @@ const KNOWLEDGE_DDL = {
   mysql: `CREATE TABLE IF NOT EXISTS knowledge_base (
       id INT UNSIGNED NOT NULL AUTO_INCREMENT,
       title VARCHAR(255) NOT NULL,
+      category ENUM('BINARY', 'FOREX', 'GENERAL') NOT NULL DEFAULT 'GENERAL',
       source_type ENUM('TEXT', 'PDF') NOT NULL,
       content LONGTEXT NOT NULL,
       file_name VARCHAR(255) NULL,
+      pdf_file_path VARCHAR(255) NULL,
       page_count INT UNSIGNED NOT NULL DEFAULT 0,
       is_active TINYINT(1) NOT NULL DEFAULT 1,
       created_at DATETIME NOT NULL,
       updated_at DATETIME NOT NULL,
       PRIMARY KEY (id),
-      KEY idx_knowledge_active (is_active)
+      KEY idx_knowledge_active (is_active),
+      KEY idx_knowledge_category (category, is_active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   sqlite: `CREATE TABLE IF NOT EXISTS knowledge_base (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'GENERAL'
+        CHECK (category IN ('BINARY', 'FOREX', 'GENERAL')),
       source_type TEXT NOT NULL CHECK (source_type IN ('TEXT', 'PDF')),
       content TEXT NOT NULL,
       file_name TEXT NULL,
+      pdf_file_path TEXT NULL,
       page_count INTEGER NOT NULL DEFAULT 0,
       is_active INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`,
+};
+
+const KNOWLEDGE_COLUMNS = {
+  mysql: [
+    "ADD COLUMN category ENUM('BINARY', 'FOREX', 'GENERAL') NOT NULL DEFAULT 'GENERAL'",
+    'ADD COLUMN pdf_file_path VARCHAR(255) NULL',
+  ],
+  sqlite: [
+    "ADD COLUMN category TEXT NOT NULL DEFAULT 'GENERAL'",
+    'ADD COLUMN pdf_file_path TEXT NULL',
+  ],
+};
+
+/** CMS pages (Terms, About) and per-user trade settings. */
+const CONTENT_DDL = {
+  mysql: [
+    `CREATE TABLE IF NOT EXISTS cms_pages (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      slug VARCHAR(64) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      content LONGTEXT NOT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_cms_slug (slug)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS user_trade_settings (
+      user_id INT UNSIGNED NOT NULL,
+      binary_min_confidence INT UNSIGNED NOT NULL DEFAULT 70,
+      binary_duration_seconds INT UNSIGNED NOT NULL DEFAULT 60,
+      binary_strategy TEXT NULL,
+      forex_min_confidence INT UNSIGNED NOT NULL DEFAULT 70,
+      forex_timeframe VARCHAR(8) NOT NULL DEFAULT '15M',
+      forex_strategy TEXT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (user_id),
+      CONSTRAINT fk_trade_settings_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  ],
+  sqlite: [
+    `CREATE TABLE IF NOT EXISTS cms_pages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      slug TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_trade_settings (
+      user_id INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+      binary_min_confidence INTEGER NOT NULL DEFAULT 70,
+      binary_duration_seconds INTEGER NOT NULL DEFAULT 60,
+      binary_strategy TEXT NULL,
+      forex_min_confidence INTEGER NOT NULL DEFAULT 70,
+      forex_timeframe TEXT NOT NULL DEFAULT '15M',
+      forex_strategy TEXT NULL,
+      updated_at TEXT NOT NULL
+    )`,
+  ],
 };
 
 const ACCOUNTS_DDL = {
@@ -319,6 +383,7 @@ const DEFAULT_SETTINGS = [
   ['affiliate_link', ''],
   ['support_contact_link', ''],
   ['app_name', 'AI Trading Assistant'],
+  ['app_icon_url', ''],
   ['default_plan_type', 'FREE'],
   ['crypto_network', 'BEP20'],
   ['crypto_wallet_address', ''],
@@ -341,6 +406,12 @@ export async function initSchema() {
     await db.exec(statement);
   }
 
+  await migrateKnowledgeColumns(db);
+
+  for (const statement of CONTENT_DDL[db.client]) {
+    await db.exec(statement);
+  }
+
   if (db.client === 'sqlite') {
     await db.exec('CREATE INDEX IF NOT EXISTS idx_activities_user ON user_activities (user_id)');
     await db.exec('CREATE INDEX IF NOT EXISTS idx_codes_assigned ON activation_codes (assigned_user_id)');
@@ -350,6 +421,34 @@ export async function initSchema() {
 
   await seedDefaults(db);
   return db.client;
+}
+
+async function migrateKnowledgeColumns(db) {
+  const existing = db.client === 'mysql'
+    ? new Set(
+        (
+          await db.all(
+            `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'knowledge_base'`,
+          )
+        ).map((row) => String(row.name).toLowerCase()),
+      )
+    : new Set(
+        (await db.all('PRAGMA table_info(knowledge_base)')).map((row) => String(row.name).toLowerCase()),
+      );
+
+  const wanted = ['category', 'pdf_file_path'];
+  const statements = KNOWLEDGE_COLUMNS[db.client];
+
+  for (let index = 0; index < wanted.length; index += 1) {
+    if (existing.has(wanted[index])) continue;
+    try {
+      await db.exec(`ALTER TABLE knowledge_base ${statements[index]}`);
+    } catch (error) {
+      // A concurrent deploy may have added it first.
+      console.warn(`[db] could not add knowledge_base.${wanted[index]}: ${error?.message || error}`);
+    }
+  }
 }
 
 async function seedDefaults(db) {
@@ -380,5 +479,48 @@ async function seedDefaults(db) {
 
   for (const [key, value] of DEFAULT_SETTINGS) {
     await db.run(insertSetting, [key, value, timestamp()]);
+  }
+
+  await seedStrategies(db);
+  await seedCmsPages(db);
+}
+
+/**
+ * Installs the built-in strategy library once per category when that category
+ * has no entries yet, so a fresh install is immediately useful without ever
+ * duplicating rows or overwriting an admin's edits.
+ */
+async function seedStrategies(db) {
+  const now = timestamp();
+
+  for (const [category, entries] of [
+    ['BINARY', BINARY_STRATEGIES],
+    ['FOREX', FOREX_STRATEGIES],
+  ]) {
+    const countRow = await db.get(
+      'SELECT COUNT(*) AS total FROM knowledge_base WHERE category = ?',
+      [category],
+    );
+    if (Number(countRow?.total ?? 0) > 0) continue;
+
+    for (const entry of entries) {
+      await db.run(
+        `INSERT INTO knowledge_base
+           (title, category, source_type, content, file_name, pdf_file_path, page_count, is_active, created_at, updated_at)
+         VALUES (?, ?, 'TEXT', ?, NULL, NULL, 0, 1, ?, ?)`,
+        [entry.title, category, entry.content, now, now],
+      );
+    }
+  }
+}
+
+async function seedCmsPages(db) {
+  const insertPage =
+    db.client === 'mysql'
+      ? 'INSERT IGNORE INTO cms_pages (slug, title, content, updated_at) VALUES (?, ?, ?, ?)'
+      : 'INSERT OR IGNORE INTO cms_pages (slug, title, content, updated_at) VALUES (?, ?, ?, ?)';
+
+  for (const page of DEFAULT_CMS_PAGES) {
+    await db.run(insertPage, [page.slug, page.title, page.content, timestamp()]);
   }
 }

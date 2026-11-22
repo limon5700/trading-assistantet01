@@ -3,16 +3,18 @@ import { Modal } from './Modal';
 import { Switch } from './Switch';
 import { useToast } from './ToastProvider';
 import { ApiError, api } from '../lib/api';
-import type { KnowledgeEntry } from '../lib/types';
+import type { KnowledgeCategory, KnowledgeEntry } from '../lib/types';
 
 interface TextKnowledgeModalProps {
   open: boolean;
   onClose: () => void;
   onSaved: (item: KnowledgeEntry) => void;
+  category: KnowledgeCategory;
 }
 
-export function TextKnowledgeModal({ open, onClose, onSaved }: TextKnowledgeModalProps) {
+export function TextKnowledgeModal({ open, onClose, onSaved, category }: TextKnowledgeModalProps) {
   const toast = useToast();
+  const [entryCategory, setEntryCategory] = useState<KnowledgeCategory>(category);
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [isActive, setIsActive] = useState(true);
@@ -24,16 +26,17 @@ export function TextKnowledgeModal({ open, onClose, onSaved }: TextKnowledgeModa
     setTitle('');
     setContent('');
     setIsActive(true);
+    setEntryCategory(category);
     setError(null);
     setSaving(false);
-  }, [open]);
+  }, [open, category]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
     setSaving(true);
     try {
-      const { item } = await api.createText({ title, content, isActive });
+      const { item } = await api.createText({ title, content, isActive, category: entryCategory });
       toast.success('Text knowledge added.');
       onSaved(item);
       onClose();
@@ -66,6 +69,23 @@ export function TextKnowledgeModal({ open, onClose, onSaved }: TextKnowledgeModa
       }
     >
       <form id="text-knowledge-form" onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="label" htmlFor="text-category">
+            Strategy category
+          </label>
+          <select
+            id="text-category"
+            className="input"
+            value={entryCategory}
+            onChange={(event) => setEntryCategory(event.target.value as KnowledgeCategory)}
+            disabled={saving}
+          >
+            <option value="BINARY">Binary strategies</option>
+            <option value="FOREX">Forex strategies</option>
+            <option value="GENERAL">General knowledge</option>
+          </select>
+        </div>
+
         <div>
           <label className="label" htmlFor="text-title">
             Title

@@ -12,6 +12,7 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioAttributes
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -19,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.speech.tts.TextToSpeech
 import android.util.Base64
 import android.util.Log
 import android.view.Gravity
@@ -30,8 +32,8 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -40,12 +42,17 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.Executors
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * Foreground service that shows the draggable overlay card and periodically
- * captures the screen with MediaProjection, posts it to the backend and renders
- * the returned trading signal.
+ * Foreground service that shows the draggable trading widget.
+ *
+ * While the widget is open it captures the screen every few seconds and quietly
+ * caches the latest analysis in either BINARY or FOREX mode. It never pops up or
+ * speaks during that loop: the trader taps the compact bubble to receive the
+ * signal, which renders the card, speaks it through TextToSpeech and expands to
+ * the full structured view with the raw JSON.
  */
 class FloatingWidgetService : Service() {
 
@@ -55,6 +62,9 @@ class FloatingWidgetService : Service() {
         const val ACTION_START = "com.aitrading.assistant.action.START"
         const val ACTION_STOP = "com.aitrading.assistant.action.STOP"
         const val ACTION_ANALYZE = "com.aitrading.assistant.action.ANALYZE"
+        const val ACTION_DELIVER = "com.aitrading.assistant.action.DELIVER"
+        const val ACTION_SET_MODE = "com.aitrading.assistant.action.SET_MODE"
+        const val ACTION_SET_VOICE = "com.aitrading.assistant.action.SET_VOICE"
         const val ACTION_UPDATE_SERVER = "com.aitrading.assistant.action.UPDATE_SERVER"
 
         const val ACTION_ANALYSIS = "com.aitrading.assistant.event.ANALYSIS"
@@ -65,6 +75,8 @@ class FloatingWidgetService : Service() {
         const val EXTRA_RESULT_DATA = "result_data"
         const val EXTRA_SERVER_URL = "server_url"
         const val EXTRA_USER_TOKEN = "user_token"
+        const val EXTRA_MODE = "signal_mode"
+        const val EXTRA_VOICE_ENABLED = "voice_enabled"
         const val EXTRA_ANALYSIS = "analysis"
         const val EXTRA_RUNNING = "running"
         const val EXTRA_MESSAGE = "message"
@@ -72,19 +84,34 @@ class FloatingWidgetService : Service() {
         const val PREFS_NAME = "trading_overlay"
         const val KEY_SERVER_URL = "server_url"
         const val KEY_USER_TOKEN = "user_token"
+        const val KEY_MODE = "signal_mode"
+        const val KEY_VOICE = "voice_enabled"
+
+        const val MODE_BINARY = "BINARY"
+        const val MODE_FOREX = "FOREX"
+
+        const val UTTERANCE_ID = "SIGNAL_UTTERANCE"
 
         private const val CHANNEL_ID = "trading_overlay_channel"
         private const val NOTIFICATION_ID = 4310
-        private const val ANALYSIS_INTERVAL_MS = 15_000L
-        private const val CAPTURE_DELAY_MS = 350L
+
+        /** Background loop: within the 5-8 second window the brief asks for. */
+        private const val ANALYSIS_INTERVAL_MS = 6_000L
+        private const val CAPTURE_DELAY_MS = 300L
         private const val MAX_CAPTURE_WIDTH = 1280
         private const val JPEG_QUALITY = 80
         private const val MAX_FRAME_ATTEMPTS = 8
         private const val FRAME_RETRY_MS = 150L
 
+        /** Older than this and a tap triggers a fresh on-demand scan. */
+        private const val CACHE_FRESH_MS = 20_000L
+
         @Volatile
         var isRunning: Boolean = false
             private set
+
+        fun normalizeMode(value: String?): String =
+            if (value?.trim()?.uppercase(Locale.US) == MODE_FOREX) MODE_FOREX else MODE_BINARY
     }
 
     private lateinit var windowManager: WindowManager
@@ -92,16 +119,22 @@ class FloatingWidgetService : Service() {
     private var bubbleView: View? = null
     private var expandedView: View? = null
     private var dragHandle: View? = null
+    private var bubbleMode: TextView? = null
     private var bubbleSignal: TextView? = null
+    private var bubbleHint: TextView? = null
     private var signalBadge: TextView? = null
+    private var modeBadge: TextView? = null
     private var confidenceText: TextView? = null
     private var assetText: TextView? = null
+    private var candleText: TextView? = null
     private var timingText: TextView? = null
-    private var timeframeText: TextView? = null
+    private var levelsText: TextView? = null
     private var reasonText: TextView? = null
+    private var voiceText: TextView? = null
     private var statusText: TextView? = null
+    private var jsonText: TextView? = null
+    private var deliverButton: TextView? = null
     private var analyzeButton: TextView? = null
-    private var expandedAnalyzeButton: TextView? = null
     private var expandButton: TextView? = null
     private var showLessButton: TextView? = null
     private var expanded = false
@@ -114,8 +147,19 @@ class FloatingWidgetService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private val networkExecutor = Executors.newSingleThreadExecutor()
     private var analyzing = false
+    @Volatile
+    private var deliverWhenReady = false
     private var serverUrl: String = ""
     private var userToken: String = ""
+
+    private var mode: String = MODE_BINARY
+    private var voiceEnabled = true
+    private var cachedAnalysis: JSONObject? = null
+    private var cachedAt = 0L
+
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var pendingSpeech: String? = null
 
     private val analysisLoop = object : Runnable {
         override fun run() {
@@ -132,23 +176,61 @@ class FloatingWidgetService : Service() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         serverUrl = loadServerUrl()
         userToken = loadUserToken()
+        mode = normalizeMode(
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_MODE, MODE_BINARY),
+        )
+        voiceEnabled = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_VOICE, true)
         createNotificationChannel()
+        initTts()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> handleStart(intent)
+
             ACTION_STOP -> {
                 stopEverything()
                 return START_NOT_STICKY
             }
+
             ACTION_ANALYZE -> {
-                if (isRunning && !analyzing) {
+                if (isRunning) {
                     handler.removeCallbacks(analysisLoop)
-                    captureAndAnalyze()
+                    if (!analyzing) captureAndAnalyze()
                     handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
                 }
             }
+
+            ACTION_DELIVER -> if (isRunning) deliverSignal()
+
+            ACTION_SET_MODE -> {
+                val next = normalizeMode(intent.getStringExtra(EXTRA_MODE))
+                if (next != mode) {
+                    mode = next
+                    cachedAnalysis = null
+                    cachedAt = 0L
+                    persistMode(mode)
+                    applyModeBadge()
+                    updateStatus("${modeLabel()} mode · background analysis running")
+                    broadcastState(isRunning)
+                    if (isRunning) {
+                        handler.removeCallbacks(analysisLoop)
+                        if (!analyzing) captureAndAnalyze()
+                        handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
+                    }
+                }
+            }
+
+            ACTION_SET_VOICE -> {
+                voiceEnabled = intent.getBooleanExtra(EXTRA_VOICE_ENABLED, voiceEnabled)
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(KEY_VOICE, voiceEnabled)
+                    .apply()
+                updateStatus(if (voiceEnabled) "Voice alerts on" else "Voice alerts off")
+            }
+
             ACTION_UPDATE_SERVER -> {
                 intent.getStringExtra(EXTRA_SERVER_URL)?.let {
                     serverUrl = it
@@ -156,6 +238,7 @@ class FloatingWidgetService : Service() {
                 }
                 intent.getStringExtra(EXTRA_USER_TOKEN)?.let { userToken = it }
             }
+
             else -> {
                 if (!isRunning) stopSelf()
             }
@@ -173,6 +256,17 @@ class FloatingWidgetService : Service() {
         }
         intent.getStringExtra(EXTRA_SERVER_URL)?.takeIf { it.isNotBlank() }?.let { serverUrl = it }
         intent.getStringExtra(EXTRA_USER_TOKEN)?.takeIf { it.isNotBlank() }?.let { userToken = it }
+        intent.getStringExtra(EXTRA_MODE)?.let {
+            mode = normalizeMode(it)
+            persistMode(mode)
+        }
+        if (intent.hasExtra(EXTRA_VOICE_ENABLED)) {
+            voiceEnabled = intent.getBooleanExtra(EXTRA_VOICE_ENABLED, voiceEnabled)
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_VOICE, voiceEnabled)
+                .apply()
+        }
 
         if (resultData == null || resultCode == 0) {
             broadcastError("Screen capture permission was not granted")
@@ -201,8 +295,10 @@ class FloatingWidgetService : Service() {
             showOverlay()
             isRunning = true
             broadcastState(true)
-            updateStatus("Watching chart…")
-            handler.postDelayed(analysisLoop, 1_200L)
+            applyModeBadge()
+            updateStatus("${modeLabel()} mode · watching the chart silently")
+            // Start capturing right away so the first tap already has a cached signal.
+            handler.postDelayed(analysisLoop, 900L)
         } catch (error: Exception) {
             Log.e(TAG, "Could not start screen capture", error)
             broadcastError("Could not start screen capture: ${error.message}")
@@ -214,9 +310,7 @@ class FloatingWidgetService : Service() {
         val callback = object : MediaProjection.Callback() {
             override fun onStop() {
                 handler.post {
-                    if (isRunning) {
-                        broadcastError("Screen capture stopped")
-                    }
+                    if (isRunning) broadcastError("Screen capture stopped")
                     stopEverything()
                 }
             }
@@ -255,16 +349,22 @@ class FloatingWidgetService : Service() {
         bubbleView = view.findViewById(R.id.bubble_view)
         expandedView = view.findViewById(R.id.expanded_view)
         dragHandle = view.findViewById(R.id.drag_handle)
+        bubbleMode = view.findViewById(R.id.bubble_mode)
         bubbleSignal = view.findViewById(R.id.bubble_signal)
+        bubbleHint = view.findViewById(R.id.bubble_hint)
         signalBadge = view.findViewById(R.id.signal_badge)
+        modeBadge = view.findViewById(R.id.mode_badge)
         confidenceText = view.findViewById(R.id.confidence_text)
         assetText = view.findViewById(R.id.asset_text)
+        candleText = view.findViewById(R.id.candle_text)
         timingText = view.findViewById(R.id.timing_text)
-        timeframeText = view.findViewById(R.id.timeframe_text)
+        levelsText = view.findViewById(R.id.levels_text)
         reasonText = view.findViewById(R.id.reason_text)
+        voiceText = view.findViewById(R.id.voice_text)
         statusText = view.findViewById(R.id.status_text)
+        jsonText = view.findViewById(R.id.json_text)
+        deliverButton = view.findViewById(R.id.deliver_button)
         analyzeButton = view.findViewById(R.id.analyze_button)
-        expandedAnalyzeButton = view.findViewById(R.id.expanded_analyze_button)
         expandButton = view.findViewById(R.id.expand_button)
         showLessButton = view.findViewById(R.id.show_less_button)
         expanded = false
@@ -289,9 +389,10 @@ class FloatingWidgetService : Service() {
             y = 220
         }
 
-        attachDragHandler(dragHandle, params)
-        attachDragHandler(bubbleView, params)
+        attachDragHandler(dragHandle, params, null)
+        attachDragHandler(bubbleView, params) { deliverSignal() }
         attachActions(view)
+        applyModeBadge()
 
         try {
             windowManager.addView(view, params)
@@ -302,54 +403,71 @@ class FloatingWidgetService : Service() {
         }
     }
 
-    private fun attachDragHandler(target: View?, params: WindowManager.LayoutParams) {
+    /**
+     * Drags a view, and optionally reports a tap (press + release without real
+     * movement) so the compact bubble can deliver a signal on a single tap.
+     */
+    private fun attachDragHandler(
+        target: View?,
+        params: WindowManager.LayoutParams,
+        onTap: (() -> Unit)?,
+    ) {
         val handle = target ?: return
         var startX = 0
         var startY = 0
         var touchX = 0f
         var touchY = 0f
+        var moved = false
 
         handle.setOnTouchListener { _, event ->
-            when (event.action) {
+            when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     startX = params.x
                     startY = params.y
                     touchX = event.rawX
                     touchY = event.rawY
+                    moved = false
                     true
                 }
+
                 MotionEvent.ACTION_MOVE -> {
-                    params.x = startX + (event.rawX - touchX).roundToInt()
-                    params.y = startY + (event.rawY - touchY).roundToInt()
-                    overlayView?.let { view ->
-                        try {
-                            windowManager.updateViewLayout(view, params)
-                        } catch (ignored: IllegalArgumentException) {
-                            // View was removed while dragging.
+                    val dx = event.rawX - touchX
+                    val dy = event.rawY - touchY
+                    if (abs(dx) > 8f || abs(dy) > 8f) moved = true
+                    if (moved) {
+                        params.x = startX + dx.roundToInt()
+                        params.y = startY + dy.roundToInt()
+                        overlayView?.let { view ->
+                            try {
+                                windowManager.updateViewLayout(view, params)
+                            } catch (ignored: IllegalArgumentException) {
+                                // View was removed while dragging.
+                            }
                         }
                     }
                     true
                 }
+
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) onTap?.invoke()
+                    true
+                }
+
                 else -> false
             }
         }
     }
 
     private fun attachActions(view: View) {
-        val analyze = View.OnClickListener {
-            if (!analyzing) {
-                handler.removeCallbacks(analysisLoop)
-                captureAndAnalyze()
-                handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
-            }
+        deliverButton?.setOnClickListener { deliverSignal() }
+        analyzeButton?.setOnClickListener {
+            handler.removeCallbacks(analysisLoop)
+            if (!analyzing) captureAndAnalyze()
+            handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
         }
-        analyzeButton?.setOnClickListener(analyze)
-        expandedAnalyzeButton?.setOnClickListener(analyze)
         expandButton?.setOnClickListener { setExpanded(true) }
         showLessButton?.setOnClickListener { setExpanded(false) }
-        view.findViewById<TextView>(R.id.stop_button)?.setOnClickListener {
-            stopEverything()
-        }
+        view.findViewById<TextView>(R.id.stop_button)?.setOnClickListener { stopEverything() }
     }
 
     /** Switches between the compact circle and the full signal card. */
@@ -363,11 +481,11 @@ class FloatingWidgetService : Service() {
 
         show.visibility = View.VISIBLE
         show.alpha = 0f
-        show.scaleX = 0.92f
-        show.scaleY = 0.92f
-        show.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(170).start()
+        show.scaleX = 0.94f
+        show.scaleY = 0.94f
+        show.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(160).start()
 
-        hide.animate().alpha(0f).scaleX(0.92f).scaleY(0.92f).setDuration(120).withEndAction {
+        hide.animate().alpha(0f).scaleX(0.94f).scaleY(0.94f).setDuration(110).withEndAction {
             hide.visibility = View.GONE
             hide.alpha = 1f
             hide.scaleX = 1f
@@ -375,10 +493,10 @@ class FloatingWidgetService : Service() {
         }.start()
     }
 
-    private fun setAnalyzeEnabled(enabled: Boolean) {
+    private fun setActionsEnabled(enabled: Boolean) {
         handler.post {
+            deliverButton?.isEnabled = enabled
             analyzeButton?.isEnabled = enabled
-            expandedAnalyzeButton?.isEnabled = enabled
         }
     }
 
@@ -389,10 +507,12 @@ class FloatingWidgetService : Service() {
                 badge.text = "BUY"
                 badge.setBackgroundResource(R.drawable.signal_buy)
             }
+
             "SELL" -> {
                 badge.text = "SELL"
                 badge.setBackgroundResource(R.drawable.signal_sell)
             }
+
             else -> {
                 badge.text = "WAIT"
                 badge.setBackgroundResource(R.drawable.signal_wait)
@@ -400,38 +520,177 @@ class FloatingWidgetService : Service() {
         }
     }
 
+    private fun applyModeBadge() {
+        handler.post {
+            val label = modeLabel()
+            modeBadge?.text = label
+            bubbleMode?.text = label
+        }
+    }
+
+    private fun modeLabel(): String = if (mode == MODE_FOREX) "FX" else "BIN"
+
     private fun updateStatus(message: String) {
         handler.post { statusText?.text = message }
     }
 
-    private fun renderAnalysis(analysis: JSONObject) {
+    /** Renders the full structured card. Speaks only when `speak` is true. */
+    private fun renderAnalysis(analysis: JSONObject, speak: Boolean) {
         handler.post {
-            val signal = analysis.optString("signal", "NO_TRADE").uppercase(Locale.US)
+            val signal = analysis.optString("signal", "WAIT").uppercase(Locale.US)
+            val resolvedMode = if (analysis.optString("mode", mode).uppercase(Locale.US) == MODE_FOREX) {
+                MODE_FOREX
+            } else {
+                MODE_BINARY
+            }
+
             applySignalBadge(bubbleSignal, signal)
             applySignalBadge(signalBadge, signal)
+            bubbleHint?.text = "TAP\nFOR SIGNAL"
 
             confidenceText?.text = "${analysis.optInt("confidence", 0)}%"
-            assetText?.text = "Asset: ${analysis.optString("asset", "—")}"
-            timingText?.text = "Entry: ${analysis.optString("entry_time", "—")}"
-            timeframeText?.text = "Timeframe: ${analysis.optString("timeframe", "—")}"
+            assetText?.text = "${if (resolvedMode == MODE_FOREX) "Forex" else "Binary"} · ${analysis.optString("asset", "—")}"
+            candleText?.text = "Candle: " + when (analysis.optString("candle_entry")) {
+                "RUNNING_CANDLE" -> "Running Candle"
+                "NEXT_CANDLE" -> "Next Candle"
+                else -> "—"
+            }
+
+            if (resolvedMode == MODE_FOREX) {
+                timingText?.text = "Timeframe: ${analysis.optString("timeframe", "—")}"
+                levelsText?.text = buildString {
+                    append("Entry ").append(analysis.optString("entry_price", "—"))
+                    append("  ·  SL ").append(analysis.optString("stop_loss", "—"))
+                    append("  ·  TP ").append(analysis.optString("take_profit", "—"))
+                }
+            } else {
+                val seconds = analysis.optInt("duration_seconds", 60)
+                val expiry = analysis.optString("expiry_label").ifBlank { "${seconds}s" }
+                timingText?.text = "Duration: $expiry  ·  ${analysis.optString("entry_time", "—")}"
+                levelsText?.text = "Expiry ${seconds}s"
+            }
+
             reasonText?.text = analysis.optString("reason", "")
+            voiceText?.text = analysis.optString("voice_summary", "")
+            jsonText?.text = analysis.toString(2)
             updateStatus(
-                "Updated ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())} · JSON ok",
+                "Delivered ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())} · ${analysis.optString("mode", mode)}",
             )
+
+            if (speak) {
+                speak(analysis.optString("voice_summary", ""))
+            }
+        }
+    }
+
+    /** Quietly caches the result without any popup or speech. */
+    private fun cacheAnalysis(analysis: JSONObject) {
+        cachedAnalysis = analysis
+        cachedAt = System.currentTimeMillis()
+        handler.post {
+            // The bubble only shows the mode while collapsed; the result appears on tap.
+            bubbleHint?.text = "TAP\nFOR SIGNAL"
+        }
+        broadcastAnalysis(analysis)
+    }
+
+    // ----------------------------------------------------------------- voice
+
+    /**
+     * Initializes Android text-to-speech on the main thread with an explicit
+     * US-English locale, falling back to the device locale. Audio attributes use
+     * the accessibility usage so the utterance plays even while the overlay is
+     * on top of a trading app.
+     */
+    private fun initTts() {
+        if (tts != null) return
+        tts = TextToSpeech(applicationContext) { status ->
+            handler.post {
+                if (status != TextToSpeech.SUCCESS) {
+                    ttsReady = false
+                    Log.w(TAG, "TextToSpeech init failed with status $status")
+                    return@post
+                }
+                val engine = tts ?: return@post
+                val language = try {
+                    engine.setLanguage(Locale.US)
+                } catch (error: Exception) {
+                    TextToSpeech.LANG_NOT_SUPPORTED
+                }
+                if (language == TextToSpeech.LANG_MISSING_DATA || language == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    engine.setLanguage(Locale.getDefault())
+                }
+                engine.setSpeechRate(1.0f)
+                engine.setPitch(1.0f)
+                try {
+                    engine.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build(),
+                    )
+                } catch (ignored: Exception) {
+                    // Older engines may not expose audio attributes.
+                }
+                ttsReady = true
+                pendingSpeech?.let { text ->
+                    pendingSpeech = null
+                    speak(text)
+                }
+            }
+        }
+    }
+
+    private fun speak(text: String) {
+        if (!voiceEnabled) return
+        val message = text.trim()
+        if (message.isEmpty()) return
+        if (tts == null) initTts()
+
+        val engine = tts
+        if (engine == null || !ttsReady) {
+            pendingSpeech = message
+            return
+        }
+        try {
+            engine.speak(message, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
+        } catch (error: Exception) {
+            Log.w(TAG, "TextToSpeech speak failed", error)
+            ttsReady = false
+            pendingSpeech = message
         }
     }
 
     // ------------------------------------------------------------- analysis
 
+    /**
+     * One-tap delivery: speaks and shows the cached analysis when it is fresh,
+     * otherwise runs an immediate on-demand scan and delivers that result.
+     */
+    private fun deliverSignal() {
+        val cached = cachedAnalysis
+        if (cached != null && System.currentTimeMillis() - cachedAt < CACHE_FRESH_MS) {
+            renderAnalysis(cached, true)
+            updateStatus("Signal delivered · ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}")
+            return
+        }
+
+        deliverWhenReady = true
+        handler.removeCallbacks(analysisLoop)
+        updateStatus("Scanning for an instant signal…")
+        if (!analyzing) captureAndAnalyze()
+        handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
+    }
+
     private fun captureAndAnalyze() {
         if (analyzing || !isRunning) return
+        if (deliverWhenReady) updateStatus("Scanning for an instant signal…") else updateStatus("Reading the chart…")
         analyzing = true
-        updateStatus("Analyzing chart…")
-        setAnalyzeEnabled(false)
+        setActionsEnabled(false)
 
         if (imageReader == null) {
             analyzing = false
-            setAnalyzeEnabled(true)
+            setActionsEnabled(true)
             updateStatus("Screen capture is not ready")
             return
         }
@@ -447,14 +706,14 @@ class FloatingWidgetService : Service() {
     private fun captureFrame(attempt: Int) {
         if (!isRunning) {
             analyzing = false
-            setAnalyzeEnabled(true)
+            setActionsEnabled(true)
             return
         }
 
         val reader = imageReader
         if (reader == null) {
             analyzing = false
-            setAnalyzeEnabled(true)
+            setActionsEnabled(true)
             updateStatus("Screen capture is not ready")
             return
         }
@@ -478,7 +737,7 @@ class FloatingWidgetService : Service() {
                 handler.postDelayed({ captureFrame(attempt + 1) }, FRAME_RETRY_MS)
             } else {
                 analyzing = false
-                setAnalyzeEnabled(true)
+                setActionsEnabled(true)
                 updateStatus("Waiting for the screen…")
             }
             return
@@ -527,43 +786,43 @@ class FloatingWidgetService : Service() {
 
     private fun sendForAnalysis(imageBase64: String) {
         if (serverUrl.isBlank()) {
-            analyzing = false
-            setAnalyzeEnabled(true)
+            finishAnalysis()
             broadcastError("This build has no backend URL. Reinstall the official app.")
             updateStatus("Backend URL missing")
             return
         }
         if (userToken.isBlank()) {
-            analyzing = false
-            setAnalyzeEnabled(true)
+            finishAnalysis()
             broadcastError("Your session expired. Open the app and sign in again.")
             updateStatus("Sign-in required")
             return
         }
 
         val endpoint = "${serverUrl.trimEnd('/')}/api/analyze-chart"
+        val requestMode = mode
         val now = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
         val timezone = TimeZone.getDefault().id
 
         networkExecutor.execute {
             var connection: HttpURLConnection? = null
             try {
+                // Only the mode is sent: the server applies the user's saved
+                // minimum confidence, duration/timeframe and custom strategy.
                 val body = JSONObject()
                     .put("imageBase64", imageBase64)
                     .put("currentTime", now)
                     .put("timezone", timezone)
+                    .put("mode", requestMode)
                     .toString()
 
                 val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
                     connectTimeout = 15_000
-                    readTimeout = 60_000
+                    readTimeout = 75_000
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=utf-8")
                     setRequestProperty("Accept", "application/json")
-                    if (userToken.isNotBlank()) {
-                        setRequestProperty("Authorization", "Bearer $userToken")
-                    }
+                    setRequestProperty("Authorization", "Bearer $userToken")
                 }
                 connection = conn
 
@@ -583,22 +842,31 @@ class FloatingWidgetService : Service() {
                         ?: "Server returned HTTP $status"
                     broadcastError(message)
                     updateStatus(if (status == 401) "Sign-in required" else "Analysis failed")
+                    finishAnalysis(delivered = false)
                     return@execute
                 }
 
                 val analysis = JSONObject(responseText)
-                broadcastAnalysis(analysis)
-                renderAnalysis(analysis)
+                val shouldSpeak = deliverWhenReady
+                cacheAnalysis(analysis)
+                renderAnalysis(analysis, speak = shouldSpeak)
+                finishAnalysis(delivered = true)
             } catch (error: Exception) {
                 Log.e(TAG, "Analysis request failed", error)
                 broadcastError("Network error: ${error.message ?: "request failed"}")
                 updateStatus("Network error")
+                finishAnalysis(delivered = false)
             } finally {
                 connection?.disconnect()
-                analyzing = false
-                setAnalyzeEnabled(true)
             }
         }
+    }
+
+    private fun finishAnalysis(delivered: Boolean = false) {
+        analyzing = false
+        deliverWhenReady = false
+        setActionsEnabled(true)
+        if (!delivered) handler.post { bubbleHint?.text = "TAP\nFOR SIGNAL" }
     }
 
     // ---------------------------------------------------------- notification
@@ -613,7 +881,7 @@ class FloatingWidgetService : Service() {
             "Trading overlay",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Keeps the floating trading widget and screen capture running"
+            description = "Keeps the floating trading widget and background screen analysis running"
             setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
@@ -634,13 +902,21 @@ class FloatingWidgetService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
+        val deliverIntent = PendingIntent.getService(
+            this,
+            2,
+            Intent(this, FloatingWidgetService::class.java).apply { action = ACTION_DELIVER },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("AI Trading Assistant")
-            .setContentText("Screen analysis is running")
+            .setContentText("${modeLabel()} background analysis is running")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(openApp)
+            .addAction(0, "Signal", deliverIntent)
             .addAction(0, "Stop", stopIntent)
             .build()
     }
@@ -656,6 +932,11 @@ class FloatingWidgetService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    private fun refreshNotification() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, buildNotification())
     }
 
     // ------------------------------------------------------------- lifecycle
@@ -679,6 +960,7 @@ class FloatingWidgetService : Service() {
         mediaProjection?.stop()
         mediaProjection = null
 
+        tts?.stop()
         stopForeground(true)
         stopSelf()
     }
@@ -695,16 +977,22 @@ class FloatingWidgetService : Service() {
         bubbleView = null
         expandedView = null
         dragHandle = null
+        bubbleMode = null
         bubbleSignal = null
+        bubbleHint = null
         signalBadge = null
+        modeBadge = null
         confidenceText = null
         assetText = null
+        candleText = null
         timingText = null
-        timeframeText = null
+        levelsText = null
         reasonText = null
+        voiceText = null
         statusText = null
+        jsonText = null
+        deliverButton = null
         analyzeButton = null
-        expandedAnalyzeButton = null
         expandButton = null
         showLessButton = null
         expanded = false
@@ -718,6 +1006,9 @@ class FloatingWidgetService : Service() {
         imageReader?.close()
         projectionCallback?.let { mediaProjection?.unregisterCallback(it) }
         mediaProjection?.stop()
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
         val wasRunning = isRunning
         isRunning = false
         if (wasRunning) broadcastState(false)
@@ -738,6 +1029,14 @@ class FloatingWidgetService : Service() {
             .orEmpty()
     }
 
+    private fun persistMode(value: String) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_MODE, value)
+            .apply()
+        if (isRunning) refreshNotification()
+    }
+
     private fun broadcastAnalysis(analysis: JSONObject) {
         sendBroadcast(
             Intent(ACTION_ANALYSIS)
@@ -748,7 +1047,10 @@ class FloatingWidgetService : Service() {
 
     private fun broadcastState(running: Boolean) {
         sendBroadcast(
-            Intent(ACTION_STATE).setPackage(packageName).putExtra(EXTRA_RUNNING, running),
+            Intent(ACTION_STATE)
+                .setPackage(packageName)
+                .putExtra(EXTRA_RUNNING, running)
+                .putExtra(EXTRA_MODE, mode),
         )
     }
 

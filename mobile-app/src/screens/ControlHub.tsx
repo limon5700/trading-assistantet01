@@ -1,18 +1,14 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-} from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useSession } from '../lib/session';
 import {
   TradingOverlay,
   isNativeOverlayAvailable,
   type ChartAnalysis,
   type OverlayPermissionState,
+  type SignalMode,
 } from '../lib/overlay';
-import { API_BASE_URL, isConfiguredServerUrl } from '../lib/settings';
+import { API_BASE_URL, isConfiguredServerUrl, mediaUrl } from '../lib/settings';
+import { LegalModal } from '../components/LegalModal';
 
 const EMPTY_PERMISSIONS: OverlayPermissionState = {
   overlay: false,
@@ -26,8 +22,8 @@ function signalClass(signal: ChartAnalysis['signal']): string {
   return 'signal-badge no-trade';
 }
 
-function signalLabel(signal: ChartAnalysis['signal']): string {
-  return signal === 'NO_TRADE' ? 'WAIT / NO TRADE' : signal;
+function candleLabel(entry: ChartAnalysis['candle_entry']): string {
+  return entry === 'RUNNING_CANDLE' ? 'Running Candle' : 'Next Candle';
 }
 
 function initials(name: string): string {
@@ -46,9 +42,10 @@ interface ControlHubProps {
 }
 
 export function ControlHub({ onOpenSettings }: ControlHubProps) {
-  const { user, token, settings } = useSession();
+  const { user, token, settings, config, voiceAlerts, setVoiceAlerts } = useSession();
   const native = isNativeOverlayAvailable();
   const [permissions, setPermissions] = useState<OverlayPermissionState>(EMPTY_PERMISSIONS);
+  const [mode, setMode] = useState<SignalMode>('BINARY');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(
@@ -59,8 +56,12 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
   const [analysis, setAnalysis] = useState<ChartAnalysis | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [showPermissions, setShowPermissions] = useState(false);
+  const [showJson, setShowJson] = useState(false);
+  const [legal, setLegal] = useState<'terms' | 'about' | null>(null);
 
   const flashTimer = useRef<number | null>(null);
+  const appName = config?.app_name || settings.app_name || 'AI Trading Assistant';
+  const appIcon = mediaUrl(config?.app_icon_url || settings.app_icon_url);
 
   const refreshPermissions = useCallback(async () => {
     if (!native) return;
@@ -83,12 +84,14 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
         const analysisListener = await TradingOverlay.addListener('analysis', (payload) => {
           if (cancelled) return;
           setAnalysis(payload);
+          setMode(payload.mode);
           setLastUpdated(new Date().toLocaleTimeString());
           setError(null);
         });
         const stateListener = await TradingOverlay.addListener('overlayState', (payload) => {
           if (cancelled) return;
           setPermissions((current) => ({ ...current, running: payload.running }));
+          if (payload.mode) setMode(payload.mode);
         });
         const errorListener = await TradingOverlay.addListener('overlayError', (payload) => {
           if (cancelled) setError(payload.message);
@@ -128,25 +131,39 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
     TradingOverlay.updateServerUrl({ serverUrl: API_BASE_URL, token }).catch(() => undefined);
   }, [native, permissions.running, token]);
 
-  async function handleToggle() {
+  async function stopWidget() {
+    await TradingOverlay.stopOverlay();
+    setPermissions((current) => ({ ...current, running: false }));
+    setNotice(null);
+  }
+
+  /** Starts the widget in the requested mode (or switches mode if running). */
+  async function handleMode(nextMode: SignalMode) {
     if (busy) return;
     setError(null);
-    setBusy(true);
+    setMode(nextMode);
 
     if (!native) {
       setNotice('Start the widget from the installed Android app — the browser preview cannot draw over other apps.');
-      setBusy(false);
       return;
     }
 
-    try {
-      if (permissions.running) {
-        await TradingOverlay.stopOverlay();
-        setPermissions((current) => ({ ...current, running: false }));
-        setNotice(null);
-        return;
+    if (permissions.running) {
+      try {
+        await TradingOverlay.setMode({ mode: nextMode });
+        setNotice(`${nextMode === 'BINARY' ? 'Binary' : 'Forex'} mode — background analysis is running. Tap the bubble to hear the signal.`);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not switch mode.');
       }
+      return;
+    }
 
+    await startWidget(nextMode);
+  }
+
+  async function startWidget(nextMode: SignalMode) {
+    setBusy(true);
+    try {
       if (!token) {
         setError('Sign in again before starting the widget.');
         return;
@@ -166,16 +183,21 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
 
       if (!permissions.overlay) {
         await TradingOverlay.requestOverlayPermission();
-        setNotice('Allow “Display over other apps”, then tap start again.');
+        setNotice('Allow “Display over other apps”, then tap the mode button again.');
         await refreshPermissions();
         return;
       }
 
-      setNotice('Approve screen capture in the Android dialog to start analysing charts.');
-      const result = await TradingOverlay.startOverlay({ serverUrl: API_BASE_URL, token });
+      setNotice('Approve screen capture in the Android dialog to start the background analysis.');
+      const result = await TradingOverlay.startOverlay({
+        serverUrl: API_BASE_URL,
+        token,
+        mode: nextMode,
+      });
       if (result.started) {
         setPermissions((current) => ({ ...current, running: true }));
         setNotice(null);
+        await TradingOverlay.setVoiceEnabled({ enabled: voiceAlerts }).catch(() => undefined);
       } else {
         setNotice(null);
         setError('Screen capture was not approved, so the widget did not start.');
@@ -185,6 +207,39 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
       await refreshPermissions();
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleToggle() {
+    if (busy) return;
+    setError(null);
+    if (!native) {
+      setNotice('Start the widget from the installed Android app — the browser preview cannot draw over other apps.');
+      return;
+    }
+    if (permissions.running) {
+      setBusy(true);
+      try {
+        await stopWidget();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not stop the widget.');
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    await startWidget(mode);
+  }
+
+  async function toggleVoice() {
+    const next = !voiceAlerts;
+    setVoiceAlerts(next);
+    if (native && permissions.running) {
+      try {
+        await TradingOverlay.setVoiceEnabled({ enabled: next });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not change voice alerts.');
+      }
     }
   }
 
@@ -209,19 +264,22 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
     window.open(settings.support_contact_link, '_blank', 'noopener,noreferrer');
   }
 
-  const orbitStyle = (angle: number): CSSProperties =>
-    ({ '--angle': `${angle}deg` }) as CSSProperties;
+  const orbitStyle = (angle: number): CSSProperties => ({ '--angle': `${angle}deg` }) as CSSProperties;
 
   return (
     <div className="app">
       <header className="app-header">
-        <div className="avatar">{initials(displayName)}</div>
+        {appIcon ? (
+          <img className="avatar avatar-image" src={appIcon} alt={`${appName} icon`} />
+        ) : (
+          <div className="avatar">{initials(appName)}</div>
+        )}
         <div className="header-text">
-          <h1>{displayName}</h1>
+          <h1>{appName}</h1>
           <p className="plan-line">
             <span className="pill pill-ok">{planName}</span>
             <span className={`pill ${permissions.running ? 'pill-live' : ''}`}>
-              {permissions.running ? 'Running' : 'Idle'}
+              {permissions.running ? `${mode === 'BINARY' ? 'BIN' : 'FX'} live` : 'Idle'}
             </span>
           </p>
         </div>
@@ -232,6 +290,19 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
           </svg>
         </button>
       </header>
+
+      <p className="hub-user">
+        Signed in as <strong>{displayName}</strong>
+      </p>
+      <nav className="legal-links" aria-label="Legal pages">
+        <button type="button" className="link-btn" onClick={() => setLegal('terms')}>
+          Terms &amp; Conditions
+        </button>
+        <span aria-hidden="true">·</span>
+        <button type="button" className="link-btn" onClick={() => setLegal('about')}>
+          About Us
+        </button>
+      </nav>
 
       {notice ? <div className="alert info">{notice}</div> : null}
       {error ? (
@@ -268,52 +339,71 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
 
         <button
           type="button"
-          className="hub-orbit"
+          className={`hub-orbit${mode === 'BINARY' ? ' active' : ''}`}
           style={orbitStyle(-90)}
-          onClick={() => void handleAnalyzeNow()}
-          disabled={!permissions.running}
+          onClick={() => void handleMode('BINARY')}
+          aria-label="Binary signal mode"
         >
-          <span aria-hidden="true">⚡</span>
-          <small>Analyze</small>
+          <span aria-hidden="true">BIN</span>
+          <small>Binary Signal</small>
+        </button>
+
+        <button
+          type="button"
+          className={`hub-orbit${mode === 'FOREX' ? ' active' : ''}`}
+          style={orbitStyle(0)}
+          onClick={() => void handleMode('FOREX')}
+          aria-label="Forex signal mode"
+        >
+          <span aria-hidden="true">FX</span>
+          <small>Forex Signal</small>
         </button>
 
         <button
           type="button"
           className="hub-orbit"
-          style={orbitStyle(0)}
-          onClick={() => setShowPermissions((open) => !open)}
-          aria-expanded={showPermissions}
+          style={orbitStyle(90)}
+          onClick={onOpenSettings}
         >
-          <span aria-hidden="true">🛡</span>
-          <small>Access</small>
-        </button>
-
-        <button type="button" className="hub-orbit" style={orbitStyle(90)} onClick={openSupport}>
-          <span aria-hidden="true">💬</span>
-          <small>Support</small>
-        </button>
-
-        <button type="button" className="hub-orbit" style={orbitStyle(180)} onClick={onOpenSettings}>
           <span aria-hidden="true">⚙</span>
           <small>Settings</small>
+        </button>
+
+        <button
+          type="button"
+          className={`hub-orbit${voiceAlerts ? ' active' : ''}`}
+          style={orbitStyle(180)}
+          onClick={() => void toggleVoice()}
+          aria-pressed={voiceAlerts}
+        >
+          <span aria-hidden="true">{voiceAlerts ? '🔊' : '🔇'}</span>
+          <small>Audio {voiceAlerts ? 'ON' : 'OFF'}</small>
         </button>
       </section>
 
       <p className="hub-caption">
         {permissions.running
-          ? 'Drag the floating widget anywhere over your chart.'
-          : 'Start the widget, then approve screen capture to receive signals.'}
+          ? 'Tap the compact bubble over your chart to hear the latest signal. Show more reveals the full card and JSON.'
+          : 'Choose Binary or Forex, approve screen capture, then tap the bubble for a signal.'}
       </p>
 
       <section className="card signal-card">
         <div className="card-head">
           <h2>Latest signal</h2>
-          {lastUpdated ? <span className="muted-small">Updated {lastUpdated}</span> : null}
+          <div className="signal-card-actions">
+            {analysis ? (
+              <button type="button" className="link-btn" onClick={() => setShowJson((value) => !value)}>
+                {showJson ? 'Hide JSON' : 'JSON view'}
+              </button>
+            ) : null}
+            {lastUpdated ? <span className="muted-small">{lastUpdated}</span> : null}
+          </div>
         </div>
+
         {analysis ? (
           <>
             <div className="signal-top">
-              <span className={signalClass(analysis.signal)}>{signalLabel(analysis.signal)}</span>
+              <span className={signalClass(analysis.signal)}>{analysis.signal}</span>
               <span className="confidence">
                 <strong>{analysis.confidence}%</strong>
                 confidence
@@ -321,34 +411,83 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
             </div>
             <div className="signal-grid">
               <div className="signal-cell wide">
-                <span>Asset</span>
-                <strong>{analysis.asset}</strong>
+                <span>Mode / Asset</span>
+                <strong>
+                  {analysis.mode === 'BINARY' ? 'Binary' : 'Forex'} · {analysis.asset}
+                </strong>
               </div>
               <div className="signal-cell">
-                <span>Entry time</span>
-                <strong>{analysis.entry_time}</strong>
+                <span>Candle target</span>
+                <strong>{candleLabel(analysis.candle_entry)}</strong>
               </div>
-              <div className="signal-cell">
-                <span>Timeframe</span>
-                <strong>{analysis.timeframe}</strong>
-              </div>
+              {analysis.mode === 'BINARY' ? (
+                <div className="signal-cell">
+                  <span>Duration</span>
+                  <strong>{analysis.expiry_label || `${analysis.duration_seconds}s`}</strong>
+                </div>
+              ) : (
+                <div className="signal-cell">
+                  <span>Timeframe</span>
+                  <strong>{analysis.timeframe}</strong>
+                </div>
+              )}
+              {analysis.mode === 'BINARY' ? (
+                <div className="signal-cell wide">
+                  <span>Entry</span>
+                  <strong>{analysis.entry_time}</strong>
+                </div>
+              ) : (
+                <>
+                  <div className="signal-cell">
+                    <span>Entry</span>
+                    <strong>{analysis.entry_price}</strong>
+                  </div>
+                  <div className="signal-cell">
+                    <span>Stop loss</span>
+                    <strong>{analysis.stop_loss}</strong>
+                  </div>
+                  <div className="signal-cell">
+                    <span>Take profit</span>
+                    <strong>{analysis.take_profit}</strong>
+                  </div>
+                  <div className="signal-cell wide">
+                    <span>Entry timing</span>
+                    <strong>{candleLabel(analysis.candle_entry)}</strong>
+                  </div>
+                </>
+              )}
             </div>
             <p className="signal-reason">{analysis.reason}</p>
             <p className="signal-voice">
               <span>Voice</span>
               {analysis.voice_summary}
             </p>
+            {showJson ? <pre className="json-view">{JSON.stringify(analysis, null, 2)}</pre> : null}
           </>
         ) : (
           <p className="placeholder">
-            No analysis yet. Once the widget is running it screenshots the chart every few seconds.
+            No analysis yet. Once the widget is running it captures the chart every few seconds in the
+            background — tap the bubble for an instant signal.
           </p>
         )}
+
         {permissions.running ? (
-          <button type="button" className="btn btn-block" onClick={() => void handleAnalyzeNow()}>
-            Analyze chart now
+          <div className="signal-footer">
+            <button type="button" className="btn btn-block" onClick={() => void handleAnalyzeNow()}>
+              Analyze chart now
+            </button>
+            <button type="button" className="btn btn-block" onClick={() => void handleMode(mode)}>
+              Rescan in {mode === 'BINARY' ? 'Binary' : 'Forex'} mode
+            </button>
+            <button type="button" className="btn btn-block" onClick={openSupport}>
+              Contact support
+            </button>
+          </div>
+        ) : (
+          <button type="button" className="btn btn-block" onClick={openSupport}>
+            Contact support
           </button>
-        ) : null}
+        )}
       </section>
 
       {showPermissions ? (
@@ -401,9 +540,29 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
         </section>
       ) : null}
 
+      <button
+        type="button"
+        className="link-btn center-hint"
+        onClick={() => setShowPermissions((open) => !open)}
+        aria-expanded={showPermissions}
+      >
+        {showPermissions ? 'Hide permissions' : 'Manage permissions'}
+      </button>
+
       <p className="footer-note">
         Signals are technical analysis only and are not financial advice. Trade at your own risk.
       </p>
+
+      <LegalModal
+        open={legal !== null}
+        title={
+          legal === 'terms'
+            ? config?.terms_title || 'Terms & Conditions'
+            : config?.about_title || 'About Us'
+        }
+        content={legal === 'terms' ? config?.terms_and_conditions || '' : config?.about_us || ''}
+        onClose={() => setLegal(null)}
+      />
     </div>
   );
 }

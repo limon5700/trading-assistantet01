@@ -3,12 +3,13 @@ import { Modal } from './Modal';
 import { Switch } from './Switch';
 import { useToast } from './ToastProvider';
 import { ApiError, api } from '../lib/api';
-import type { UploadResult } from '../lib/types';
+import type { KnowledgeCategory, UploadResult } from '../lib/types';
 
 interface PdfUploadModalProps {
   open: boolean;
   onClose: () => void;
   onUploaded: (result: UploadResult) => void;
+  category: KnowledgeCategory;
 }
 
 function formatSize(bytes: number): string {
@@ -17,9 +18,10 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function PdfUploadModal({ open, onClose, onUploaded }: PdfUploadModalProps) {
+export function PdfUploadModal({ open, onClose, onUploaded, category }: PdfUploadModalProps) {
   const toast = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
+  const [entryCategory, setEntryCategory] = useState<KnowledgeCategory>(category);
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [isActive, setIsActive] = useState(true);
@@ -39,7 +41,8 @@ export function PdfUploadModal({ open, onClose, onUploaded }: PdfUploadModalProp
     setUploading(false);
     setError(null);
     setResult(null);
-  }, [open]);
+    setEntryCategory(category);
+  }, [open, category]);
 
   function acceptFile(candidate: File | undefined | null) {
     if (!candidate) return;
@@ -76,6 +79,7 @@ export function PdfUploadModal({ open, onClose, onUploaded }: PdfUploadModalProp
         file,
         title,
         isActive,
+        category: entryCategory,
         onProgress: setProgress,
       });
       setResult(uploaded);
@@ -210,6 +214,23 @@ export function PdfUploadModal({ open, onClose, onUploaded }: PdfUploadModalProp
               </div>
             </div>
           ) : null}
+
+          <div>
+            <label className="label" htmlFor="pdf-category">
+              Strategy category
+            </label>
+            <select
+              id="pdf-category"
+              className="input"
+              value={entryCategory}
+              onChange={(event) => setEntryCategory(event.target.value as KnowledgeCategory)}
+              disabled={uploading}
+            >
+              <option value="BINARY">Binary strategies</option>
+              <option value="FOREX">Forex strategies</option>
+              <option value="GENERAL">General knowledge</option>
+            </select>
+          </div>
 
           <div>
             <label className="label" htmlFor="pdf-title">

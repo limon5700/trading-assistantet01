@@ -1,6 +1,8 @@
 import { useState, type FormEvent, type InputHTMLAttributes } from 'react';
 import { ApiError } from '../lib/api';
 import { useSession } from '../lib/session';
+import { mediaUrl } from '../lib/settings';
+import { LegalModal } from '../components/LegalModal';
 
 type Tab = 'login' | 'signup';
 
@@ -14,7 +16,10 @@ const EMPTY_SIGNUP = {
 };
 
 export function AuthScreen() {
-  const { login, signup } = useSession();
+  const { login, signup, config, settings } = useSession();
+  const [legal, setLegal] = useState<'terms' | 'about' | null>(null);
+  const appName = config?.app_name || settings.app_name || 'AI Trading Assistant';
+  const appIcon = mediaUrl(config?.app_icon_url || settings.app_icon_url);
   const [tab, setTab] = useState<Tab>('login');
   const [loginForm, setLoginForm] = useState({ identifier: '', password: '' });
   const [signupForm, setSignupForm] = useState(EMPTY_SIGNUP);
@@ -97,8 +102,12 @@ export function AuthScreen() {
   return (
     <div className="auth-screen">
       <div className="auth-brand">
-        <span className="auth-logo">AI</span>
-        <h1>AI Trading Assistant</h1>
+        {appIcon ? (
+          <img className="auth-logo auth-logo-image" src={appIcon} alt={`${appName} icon`} />
+        ) : (
+          <span className="auth-logo">AI</span>
+        )}
+        <h1>{appName}</h1>
         <p>Signals over any trading app, on your phone.</p>
       </div>
 
@@ -222,9 +231,30 @@ export function AuthScreen() {
 
       </div>
 
+      <nav className="legal-links auth-legal" aria-label="Legal pages">
+        <button type="button" className="link-btn" onClick={() => setLegal('terms')}>
+          Terms &amp; Conditions
+        </button>
+        <span aria-hidden="true">·</span>
+        <button type="button" className="link-btn" onClick={() => setLegal('about')}>
+          About Us
+        </button>
+      </nav>
+
       <p className="footer-note">
         Signals are technical analysis only and are not financial advice. Trade at your own risk.
       </p>
+
+      <LegalModal
+        open={legal !== null}
+        title={
+          legal === 'terms'
+            ? config?.terms_title || 'Terms & Conditions'
+            : config?.about_title || 'About Us'
+        }
+        content={legal === 'terms' ? config?.terms_and_conditions || '' : config?.about_us || ''}
+        onClose={() => setLegal(null)}
+      />
     </div>
   );
 }

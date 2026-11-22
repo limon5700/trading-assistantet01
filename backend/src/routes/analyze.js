@@ -1,10 +1,11 @@
 import express from 'express';
 import multer from 'multer';
 import rateLimit from 'express-rate-limit';
-import { analyzeChart } from '../services/gemini.js';
+import { analyzeChart, normalizeMode } from '../services/gemini.js';
 import { config } from '../config.js';
 import { requireUser } from '../auth.js';
 import { findUserById, logActivity } from '../services/accounts.js';
+import { getTradeSettings } from '../services/tradeSettings.js';
 
 const router = express.Router();
 
@@ -92,6 +93,15 @@ function resolveImage(req) {
   return normalizeImage(req.body?.imageBase64);
 }
 
+function optionalString(value, maxLength) {
+  return typeof value === 'string' ? value.slice(0, maxLength) : '';
+}
+
+function optionalNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'), async (req, res, next) => {
   try {
     // Re-read the account on every scan so suspensions and activations apply immediately.
@@ -113,22 +123,51 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
     const image = resolveImage(req);
     if (image.error) return res.status(image.status || 400).json({ error: image.error });
 
-    const { currentTime, timezone } = req.body ?? {};
+    const body = req.body ?? {};
+    const mode = normalizeMode(body.mode);
+    const savedSettings = await getTradeSettings(user.id);
+
+    // Request values win over saved settings, so a single scan can override the
+    // user's default without permanently changing it.
+    const minConfidence = optionalNumber(
+      body.min_confidence,
+      mode === 'BINARY' ? savedSettings.binary_min_confidence : savedSettings.forex_min_confidence,
+    );
+    const preferredDuration = optionalNumber(
+      body.preferred_duration_seconds ?? body.duration_seconds,
+      savedSettings.binary_duration_seconds,
+    );
+    const preferredTimeframe =
+      optionalString(body.preferred_timeframe ?? body.timeframe, 8).toUpperCase() ||
+      savedSettings.forex_timeframe;
+    const userCustomStrategy =
+      optionalString(body.user_custom_strategy, 4000) ||
+      (mode === 'BINARY' ? savedSettings.binary_strategy : savedSettings.forex_strategy);
+
     const { analysis, knowledgeEntriesUsed, model, modelsAttempted } = await analyzeChart({
       imageBase64: image.data,
       mimeType: image.mimeType,
-      currentTime: typeof currentTime === 'string' ? currentTime.slice(0, 64) : '',
-      timezone: typeof timezone === 'string' ? timezone.slice(0, 64) : '',
+      currentTime: optionalString(body.currentTime ?? body.current_time, 64),
+      timezone: optionalString(body.timezone, 64),
+      mode,
+      userCustomStrategy,
+      minConfidence,
+      preferredDuration,
+      preferredTimeframe,
     });
 
     await logActivity({
       userId: user.id,
       action: 'SIGNAL_SCAN',
       details: {
+        mode: analysis.mode,
         signal: analysis.signal,
         confidence: analysis.confidence,
         asset: analysis.asset,
+        candle_entry: analysis.candle_entry,
+        duration_seconds: analysis.duration_seconds,
         timeframe: analysis.timeframe,
+        min_confidence: Math.round(minConfidence),
         model,
         models_attempted: modelsAttempted,
         knowledge_entries: knowledgeEntriesUsed,
@@ -139,6 +178,7 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
     res.set('X-Knowledge-Entries', String(knowledgeEntriesUsed));
     res.set('X-Gemini-Model', model);
     res.set('X-Gemini-Attempts', String(modelsAttempted.length));
+    res.set('X-Signal-Mode', analysis.mode);
     return res.json(analysis);
   } catch (error) {
     if (String(error.message).includes('timed out')) {
