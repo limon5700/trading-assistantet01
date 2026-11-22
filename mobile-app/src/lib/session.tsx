@@ -23,6 +23,7 @@ import {
 
 const TOKEN_KEY = 'ai_trading_user_token';
 const VOICE_KEY = 'ai_trading_voice_enabled';
+const TRADE_KEY = 'ai_trading_trade_settings';
 
 export const DEFAULT_TRADE_SETTINGS: TradeSettings = {
   binary_min_confidence: 70,
@@ -38,6 +39,25 @@ function readVoicePreference(): boolean {
     return window.localStorage.getItem(VOICE_KEY) !== 'off';
   } catch {
     return true;
+  }
+}
+
+/** Cached so the settings screen opens instantly, even before the server reply. */
+function readCachedTradeSettings(): TradeSettings {
+  try {
+    const raw = window.localStorage.getItem(TRADE_KEY);
+    if (raw) return { ...DEFAULT_TRADE_SETTINGS, ...(JSON.parse(raw) as Partial<TradeSettings>) };
+  } catch {
+    // Corrupt or blocked storage falls back to the defaults.
+  }
+  return DEFAULT_TRADE_SETTINGS;
+}
+
+function storeTradeSettings(value: TradeSettings): void {
+  try {
+    window.localStorage.setItem(TRADE_KEY, JSON.stringify(value));
+  } catch {
+    // Private browsing can block storage; the in-memory value still works.
   }
 }
 
@@ -88,7 +108,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [settings, setSettings] = useState<AppSettings>(EMPTY_SETTINGS);
   const [config, setConfig] = useState<PublicConfig | null>(null);
-  const [tradeSettings, setTradeSettings] = useState<TradeSettings>(DEFAULT_TRADE_SETTINGS);
+  const [tradeSettings, setTradeSettings] = useState<TradeSettings>(() => readCachedTradeSettings());
   const [voiceAlerts, setVoiceAlertsState] = useState<boolean>(() => readVoicePreference());
 
   const applySession = useCallback((payload: { user: AuthUser; plans: Plan[]; settings: AppSettings }) => {
@@ -103,6 +123,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setUser(null);
     setPlans([]);
     setSettings(EMPTY_SETTINGS);
+    setTradeSettings(DEFAULT_TRADE_SETTINGS);
+    try {
+      window.localStorage.removeItem(TRADE_KEY);
+    } catch {
+      // Storage can be unavailable in private browsing.
+    }
   }, []);
 
   // Public branding, legal pages and plans are available even before sign-in.
@@ -216,7 +242,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     tradeSettingsApi
       .get(token)
       .then((response) => {
-        if (!cancelled) setTradeSettings({ ...DEFAULT_TRADE_SETTINGS, ...response.settings });
+        if (cancelled) return;
+        const merged = { ...DEFAULT_TRADE_SETTINGS, ...response.settings };
+        setTradeSettings(merged);
+        storeTradeSettings(merged);
       })
       .catch(() => undefined);
     return () => {
@@ -239,6 +268,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const response = await tradeSettingsApi.save(token, patch);
       const merged = { ...DEFAULT_TRADE_SETTINGS, ...response.settings };
       setTradeSettings(merged);
+      storeTradeSettings(merged);
       return merged;
     },
     [token],
