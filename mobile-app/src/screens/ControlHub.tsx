@@ -42,7 +42,7 @@ interface ControlHubProps {
 }
 
 export function ControlHub({ onOpenSettings }: ControlHubProps) {
-  const { user, token, settings, config, voiceAlerts, setVoiceAlerts } = useSession();
+  const { user, token, settings, config, voiceAlerts, setVoiceAlerts, tradeSettings } = useSession();
   const native = isNativeOverlayAvailable();
   const [permissions, setPermissions] = useState<OverlayPermissionState>(EMPTY_PERMISSIONS);
   const [mode, setMode] = useState<SignalMode>('BINARY');
@@ -130,6 +130,20 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
     if (!native || !permissions.running || !token) return;
     TradingOverlay.updateServerUrl({ serverUrl: API_BASE_URL, token }).catch(() => undefined);
   }, [native, permissions.running, token]);
+
+  // Mirror the trader's saved preferences into native storage so background
+  // scans use the same threshold, duration/timeframe and custom strategy.
+  useEffect(() => {
+    if (!native) return;
+    TradingOverlay.setTradeSettings({
+      binaryMinConfidence: tradeSettings.binary_min_confidence,
+      binaryDurationSeconds: tradeSettings.binary_duration_seconds,
+      binaryStrategy: tradeSettings.binary_strategy,
+      forexMinConfidence: tradeSettings.forex_min_confidence,
+      forexTimeframe: tradeSettings.forex_timeframe,
+      forexStrategy: tradeSettings.forex_strategy,
+    }).catch(() => undefined);
+  }, [native, tradeSettings]);
 
   async function stopWidget() {
     await TradingOverlay.stopOverlay();

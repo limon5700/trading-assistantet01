@@ -80,18 +80,32 @@ check "admin user found" 1 "$(field "d['total']")"
 
 # --- seeded strategy libraries ------------------------------------------
 code "$B/api/admin/knowledge?category=BINARY" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
-check "binary strategies seeded" 4 "$(field "d['count']")"
+check "binary strategies seeded" 5 "$(field "d['count']")"
 check "seeded entries carry category" "BINARY" "$(field "d['items'][0]['category']")"
 code "$B/api/admin/knowledge?category=FOREX" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
 check "forex strategies seeded" 4 "$(field "d['count']")"
 check "forex entries carry category" "FOREX" "$(field "d['items'][0]['category']")"
 check "bad category filter rejected" 400 "$(code "$B/api/admin/knowledge?category=STOCKS" -H "Authorization: Bearer $ADMIN_TOKEN")"
 
+# --- full manual text is seeded per mode -------------------------------
+code "$B/api/admin/knowledge?category=BINARY" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
+check "binary manual seeded" PDF_TEXT "$(field "next(i['source_type'] for i in d['items'] if i['source_type'] == 'PDF_TEXT')")"
+BINARY_MANUAL_ID=$(field "next(i['id'] for i in d['items'] if i['source_type'] == 'PDF_TEXT')")
+code "$B/api/admin/knowledge/$BINARY_MANUAL_ID" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
+check "binary manual has full text" "yes" "$(field "'yes' if len(d['item']['content']) > 3000 else 'no'")"
+check "binary manual names a manual" "yes" "$(field "'yes' if 'MANUAL' in d['item']['content'].upper() else 'no'")"
+code "$B/api/admin/knowledge?category=FOREX" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
+check "forex manual seeded" PDF_TEXT "$(field "next(i['source_type'] for i in d['items'] if i['source_type'] == 'PDF_TEXT')")"
+FOREX_MANUAL_ID=$(field "next(i['id'] for i in d['items'] if i['source_type'] == 'PDF_TEXT')")
+code "$B/api/admin/knowledge/$FOREX_MANUAL_ID" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
+check "forex manual has full text" "yes" "$(field "'yes' if len(d['item']['content']) > 3000 else 'no'")"
+check "forex manual covers SMC" "yes" "$(field "'yes' if 'ORDER BLOCK' in d['item']['content'].upper() else 'no'")"
+
 check "add binary text strategy" 201 "$(code -X POST "$B/api/admin/knowledge/text" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"Smoke binary rule","category":"BINARY","content":"Only trade with the 1M impulse after a level rejection.","is_active":true}')"
 NEW_KNOWLEDGE=$(field "d['item']['id']")
 check "new strategy category" BINARY "$(field "d['item']['category']")"
 code "$B/api/admin/knowledge?category=BINARY" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
-check "binary library grew" 5 "$(field "d['count']")"
+check "binary library grew" 6 "$(field "d['count']")"
 check "strategy recategorised" 200 "$(code -X PUT "$B/api/admin/knowledge/$NEW_KNOWLEDGE" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"category":"FOREX"}')"
 check "strategy category now forex" FOREX "$(field "d['item']['category']")"
 check "invalid strategy category rejected" 400 "$(code -X POST "$B/api/admin/knowledge/text" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"x","content":"y","category":"STOCKS"}')"

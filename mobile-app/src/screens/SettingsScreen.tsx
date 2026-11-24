@@ -112,6 +112,17 @@ export function SettingsScreen({ onBack }: SettingsScreenProps) {
         forex_timeframe: forexTimeframe,
         forex_strategy: forexStrategy,
       });
+      // Push the new values straight into the floating widget as well.
+      if (isNativeOverlayAvailable()) {
+        await TradingOverlay.setTradeSettings({
+          binaryMinConfidence: binaryConfidence,
+          binaryDurationSeconds: binaryDuration,
+          binaryStrategy,
+          forexMinConfidence: forexConfidence,
+          forexTimeframe,
+          forexStrategy,
+        }).catch(() => undefined);
+      }
       setSavedFlash('Trade settings saved. The AI now uses them on every scan.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save your trade settings.');

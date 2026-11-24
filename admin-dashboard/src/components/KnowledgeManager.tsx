@@ -62,7 +62,7 @@ export function KnowledgeManager({
 
   const stats = useMemo(() => {
     const active = items.filter((item) => item.is_active).length;
-    const pdfs = items.filter((item) => item.source_type === 'PDF').length;
+    const pdfs = items.filter((item) => item.source_type !== 'TEXT').length;
     const pages = items.reduce((total, item) => total + (item.page_count || 0), 0);
     return { total: items.length, active, pdfs, pages };
   }, [items]);
@@ -136,7 +136,7 @@ export function KnowledgeManager({
         {[
           { label: 'Entries', value: stats.total },
           { label: 'Active', value: stats.active },
-          { label: 'PDF sources', value: stats.pdfs },
+          { label: 'PDF / manuals', value: stats.pdfs },
           { label: 'Pages indexed', value: stats.pages },
         ].map((stat) => (
           <div key={stat.label} className="card px-4 py-3">

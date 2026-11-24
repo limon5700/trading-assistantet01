@@ -16,21 +16,40 @@ and never bundled into the dashboard or the Android app.
 - Node.js **>= 22.5** (SQLite uses the built-in `node:sqlite` module; Node 24+
   is recommended). MySQL 8 is optional.
 
+## Quick start (Docker + MySQL, persistent)
+
+From the repository root:
+
+```bash
+cp .env.docker.example .env
+# edit .env: MYSQL_* passwords, JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, GEMINI_API_KEY
+docker compose up -d --build
+```
+
+`docker-compose.yml` runs `mysql:8.0` with the `mysql_data` volume and starts
+this API only after MySQL passes its healthcheck. On boot the server creates and
+migrates every table and seeds the default plans, settings, CMS pages and both
+strategy libraries. MySQL is the default `DB_CLIENT`.
+
+```bash
+docker compose exec backend npm run seed   # idempotent re-seed
+```
+
 ## Quick start (SQLite, zero external services)
 
 ```bash
 cd backend
 cp .env.example .env
-# edit .env: set JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, GEMINI_API_KEY
+# edit .env: set DB_CLIENT=sqlite, JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, GEMINI_API_KEY
 npm install
-npm run migrate
+npm run migrate && npm run seed
 npm start
 ```
 
 The API listens on `http://localhost:4000` and the SQLite file is created at
 `backend/data/ai_trading.db` (configurable with `SQLITE_PATH`).
 
-## MySQL mode
+## MySQL mode (without Docker)
 
 Set in `.env`:
 
@@ -43,8 +62,27 @@ DB_PASS=secret
 DB_NAME=ai_trading
 ```
 
-Then `npm run migrate`, which creates the `knowledge_base` table automatically
-(the server also runs the migration on boot).
+Then `npm run migrate` (or `npm run seed`), which creates and migrates every
+table — `users`, `plans`, `activation_codes`, `crypto_payments`, `app_settings`,
+`user_activities`, `cms_pages`, `user_trade_settings` and `knowledge_base` — and
+seeds the two strategy libraries. The server also runs the same migration and
+seed on boot, so a fresh database is usable immediately.
+
+## Knowledge libraries
+
+`BINARY` and `FOREX` are separate libraries. Each ships four topic playbooks
+plus one full manual stored as `PDF_TEXT`:
+
+- **BINARY** — candlestick price action and rejection psychology; support,
+  resistance and trendline confluence; indicator confluence and expiry timing;
+  the strict WAIT/risk filter; the complete binary manual.
+- **FOREX** — smart money concepts (BOS, CHoCH, order blocks, FVG, liquidity);
+  supply, demand and Fibonacci; execution and risk management; the complete
+  forex manual.
+
+Scans inject only the active entries of the requested mode, plus the trader's
+saved settings and custom strategy. Everything is editable from the dashboard,
+and PDF uploads are parsed page by page into the same table.
 
 ## API
 

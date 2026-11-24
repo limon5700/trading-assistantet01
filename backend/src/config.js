@@ -29,7 +29,9 @@ function bool(name, fallback = false) {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
-const dbClient = (process.env.DB_CLIENT || 'sqlite').trim().toLowerCase();
+// MySQL is the primary, persistent store. SQLite remains available as an
+// explicit fallback for offline development and the smoke test.
+const dbClient = (process.env.DB_CLIENT || 'mysql').trim().toLowerCase();
 if (!['mysql', 'sqlite'].includes(dbClient)) {
   throw new Error('DB_CLIENT must be either "mysql" or "sqlite"');
 }
@@ -71,6 +73,10 @@ export const config = {
       user: process.env.DB_USER || 'root',
       password: process.env.DB_PASS || '',
       database: process.env.DB_NAME || 'ai_trading',
+      // The API container may start before MySQL finished its first boot, so
+      // the pool keeps retrying instead of crashing the process.
+      connectAttempts: int('DB_CONNECT_ATTEMPTS', 30),
+      connectRetryMs: int('DB_CONNECT_RETRY_MS', 2000),
     },
     sqlitePath,
   },

@@ -4,7 +4,7 @@ export interface KnowledgeSummary {
   id: number;
   title: string;
   category: KnowledgeCategory;
-  source_type: 'TEXT' | 'PDF';
+  source_type: 'TEXT' | 'PDF' | 'PDF_TEXT';
   file_name: string | null;
   pdf_file_path: string | null;
   page_count: number;

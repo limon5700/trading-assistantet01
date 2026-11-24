@@ -1,0 +1,102 @@
+# Production stack: MySQL 8 + the Node API.
+#
+# Create a .env file next to this file (never commit it) with at least:
+#   MYSQL_ROOT_PASSWORD=...
+#   MYSQL_PASSWORD=...
+#   JWT_SECRET=...
+#   ADMIN_EMAIL=admin@example.com
+#   ADMIN_PASSWORD=...
+#   GEMINI_API_KEY=...
+#   PUBLIC_BASE_URL=https://api.example.com
+#
+# Then: docker compose up -d --build
+# MySQL data lives in the named volume `mysql_data`, so users, plans,
+# activation codes, trade settings and the strategy library survive every
+# container rebuild, restart and `docker compose down` (without -v).
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ai-trading-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --max_connections=200
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ai_trading}
+      MYSQL_USER: ${MYSQL_USER:-trading_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-trading_password_change_me}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password_change_me}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      # Exposed for local inspection only; remove this mapping on a public host.
+      - '${MYSQL_PORT:-3306}:3306'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    networks:
+      - ai-trading
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-trading-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      # MySQL is the primary store: all accounts, plans, codes, trade settings
+      # and knowledge items are written here.
+      DB_CLIENT: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-trading_app}
+      DB_PASS: ${MYSQL_PASSWORD:-trading_password_change_me}
+      DB_NAME: ${MYSQL_DATABASE:-ai_trading}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+      USER_JWT_EXPIRES_IN: ${USER_JWT_EXPIRES_IN:-30d}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-lite-latest}
+      GEMINI_MAX_MODEL_ATTEMPTS: ${GEMINI_MAX_MODEL_ATTEMPTS:-8}
+      GEMINI_ATTEMPT_TIMEOUT_MS: ${GEMINI_ATTEMPT_TIMEOUT_MS:-20000}
+      GEMINI_TIMEOUT_MS: ${GEMINI_TIMEOUT_MS:-60000}
+      MAX_KNOWLEDGE_CHARS: ${MAX_KNOWLEDGE_CHARS:-120000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+      UPLOADS_DIR: /app/data/uploads
+      TZ: ${TZ:-UTC}
+    volumes:
+      # Uploaded branding icons and strategy PDFs survive redeploys.
+      - backend_uploads:/app/data/uploads
+    ports:
+      - '${BACKEND_PORT:-4000}:4000'
+    networks:
+      - ai-trading
+
+volumes:
+  mysql_data:
+    name: ai_trading_mysql_data
+  backend_uploads:
+    name: ai_trading_uploads
+
+networks:
+  ai-trading:
+    name: ai_trading_network

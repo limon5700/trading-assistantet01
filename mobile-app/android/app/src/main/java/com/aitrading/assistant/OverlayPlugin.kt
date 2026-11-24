@@ -336,6 +336,48 @@ class OverlayPlugin : Plugin() {
     }
 
     /**
+     * Mirrors the trader's saved per-mode preferences into shared storage.
+     * FloatingWidgetService reads them on every scan, so the background loop
+     * sends the same min_confidence, duration/timeframe and custom strategy as
+     * the in-app request.
+     */
+    @PluginMethod
+    fun setTradeSettings(call: PluginCall) {
+        val prefs = context.getSharedPreferences(
+            FloatingWidgetService.PREFS_NAME,
+            Context.MODE_PRIVATE,
+        ).edit()
+
+        call.getInt("binaryMinConfidence")?.let {
+            prefs.putInt(FloatingWidgetService.KEY_BINARY_MIN_CONFIDENCE, it.coerceIn(1, 100))
+        }
+        call.getInt("binaryDurationSeconds")?.let {
+            prefs.putInt(FloatingWidgetService.KEY_BINARY_DURATION, it.coerceIn(5, 300))
+        }
+        call.getString("binaryStrategy")?.let {
+            prefs.putString(FloatingWidgetService.KEY_BINARY_STRATEGY, it.take(4000))
+        }
+        call.getInt("forexMinConfidence")?.let {
+            prefs.putInt(FloatingWidgetService.KEY_FOREX_MIN_CONFIDENCE, it.coerceIn(1, 100))
+        }
+        call.getString("forexTimeframe")?.let {
+            prefs.putString(FloatingWidgetService.KEY_FOREX_TIMEFRAME, it.take(8))
+        }
+        call.getString("forexStrategy")?.let {
+            prefs.putString(FloatingWidgetService.KEY_FOREX_STRATEGY, it.take(4000))
+        }
+        prefs.apply()
+
+        if (FloatingWidgetService.isRunning) {
+            val intent = Intent(context, FloatingWidgetService::class.java).apply {
+                action = FloatingWidgetService.ACTION_SET_TRADE_SETTINGS
+            }
+            context.startService(intent)
+        }
+        call.resolve(JSObject().put("applied", true))
+    }
+
+    /**
      * Speaks a fixed sentence with the same locale and audio attributes the
      * widget uses, so the user can verify text-to-speech without starting a scan.
      */

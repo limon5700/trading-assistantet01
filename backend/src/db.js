@@ -25,8 +25,9 @@ export function timestamp(date = new Date()) {
 async function createDriver() {
   if (config.db.client === 'mysql') {
     const mysql = await import('mysql2/promise');
+    const { connectAttempts, connectRetryMs, ...mysqlOptions } = config.db.mysql;
     const pool = mysql.createPool({
-      ...config.db.mysql,
+      ...mysqlOptions,
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0,
@@ -34,6 +35,33 @@ async function createDriver() {
       charset: 'utf8mb4',
       timezone: 'Z',
     });
+
+    // In Docker the backend can win the race against MySQL's first init, so
+    // wait for the server instead of failing the container on boot.
+    let lastError = null;
+    for (let attempt = 1; attempt <= connectAttempts; attempt += 1) {
+      try {
+        const connection = await pool.getConnection();
+        try {
+          await connection.ping();
+        } finally {
+          connection.release();
+        }
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt === connectAttempts) break;
+        console.warn(
+          `[db] MySQL not ready (attempt ${attempt}/${connectAttempts}): ${error?.message || error}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, connectRetryMs));
+      }
+    }
+    if (lastError) {
+      await pool.end().catch(() => {});
+      throw lastError;
+    }
 
     return {
       client: 'mysql',
@@ -111,7 +139,7 @@ const KNOWLEDGE_DDL = {
       id INT UNSIGNED NOT NULL AUTO_INCREMENT,
       title VARCHAR(255) NOT NULL,
       category ENUM('BINARY', 'FOREX', 'GENERAL') NOT NULL DEFAULT 'GENERAL',
-      source_type ENUM('TEXT', 'PDF') NOT NULL,
+      source_type ENUM('TEXT', 'PDF', 'PDF_TEXT') NOT NULL DEFAULT 'TEXT',
       content LONGTEXT NOT NULL,
       file_name VARCHAR(255) NULL,
       pdf_file_path VARCHAR(255) NULL,
@@ -128,7 +156,8 @@ const KNOWLEDGE_DDL = {
       title TEXT NOT NULL,
       category TEXT NOT NULL DEFAULT 'GENERAL'
         CHECK (category IN ('BINARY', 'FOREX', 'GENERAL')),
-      source_type TEXT NOT NULL CHECK (source_type IN ('TEXT', 'PDF')),
+      source_type TEXT NOT NULL DEFAULT 'TEXT'
+        CHECK (source_type IN ('TEXT', 'PDF', 'PDF_TEXT')),
       content TEXT NOT NULL,
       file_name TEXT NULL,
       pdf_file_path TEXT NULL,
@@ -407,6 +436,7 @@ export async function initSchema() {
   }
 
   await migrateKnowledgeColumns(db);
+  await migrateSourceType(db);
 
   for (const statement of CONTENT_DDL[db.client]) {
     await db.exec(statement);
@@ -451,6 +481,44 @@ async function migrateKnowledgeColumns(db) {
   }
 }
 
+/**
+ * Older installs only allowed TEXT and PDF. The built-in manuals are stored as
+ * PDF_TEXT (manual text that normally ships as a PDF), so widen the column and
+ * rebuild the SQLite table when its CHECK constraint predates that value.
+ */
+async function migrateSourceType(db) {
+  if (db.client === 'mysql') {
+    try {
+      await db.exec(
+        "ALTER TABLE knowledge_base MODIFY COLUMN source_type ENUM('TEXT', 'PDF', 'PDF_TEXT') NOT NULL DEFAULT 'TEXT'",
+      );
+    } catch (error) {
+      console.warn(`[db] could not widen knowledge_base.source_type: ${error?.message || error}`);
+    }
+    return;
+  }
+
+  const table = await db.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'knowledge_base'");
+  if (!table?.sql || table.sql.includes('PDF_TEXT')) return;
+
+  const columns =
+    'id, title, category, source_type, content, file_name, pdf_file_path, page_count, is_active, created_at, updated_at';
+
+  await db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    await db.exec(KNOWLEDGE_DDL.sqlite.replace('knowledge_base', 'knowledge_base_rebuild'));
+    await db.exec(
+      `INSERT INTO knowledge_base_rebuild (${columns}) SELECT ${columns} FROM knowledge_base`,
+    );
+    await db.exec('DROP TABLE knowledge_base');
+    await db.exec('ALTER TABLE knowledge_base_rebuild RENAME TO knowledge_base');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_active ON knowledge_base (is_active)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge_base (category, is_active)');
+  } finally {
+    await db.exec('PRAGMA foreign_keys = ON');
+  }
+}
+
 async function seedDefaults(db) {
   const planRow = await db.get('SELECT COUNT(*) AS total FROM plans');
   if (Number(planRow?.total ?? 0) === 0) {
@@ -486,9 +554,10 @@ async function seedDefaults(db) {
 }
 
 /**
- * Installs the built-in strategy library once per category when that category
- * has no entries yet, so a fresh install is immediately useful without ever
- * duplicating rows or overwriting an admin's edits.
+ * Installs every missing built-in entry, matched by category + title, so a
+ * fresh MySQL volume is immediately useful, an existing install picks up new
+ * playbooks on upgrade, and no admin edit or custom row is ever overwritten or
+ * duplicated.
  */
 async function seedStrategies(db) {
   const now = timestamp();
@@ -497,18 +566,26 @@ async function seedStrategies(db) {
     ['BINARY', BINARY_STRATEGIES],
     ['FOREX', FOREX_STRATEGIES],
   ]) {
-    const countRow = await db.get(
-      'SELECT COUNT(*) AS total FROM knowledge_base WHERE category = ?',
-      [category],
-    );
-    if (Number(countRow?.total ?? 0) > 0) continue;
-
     for (const entry of entries) {
+      const existing = await db.get(
+        'SELECT id FROM knowledge_base WHERE category = ? AND title = ?',
+        [category, entry.title],
+      );
+      if (existing) continue;
+
       await db.run(
         `INSERT INTO knowledge_base
            (title, category, source_type, content, file_name, pdf_file_path, page_count, is_active, created_at, updated_at)
-         VALUES (?, ?, 'TEXT', ?, NULL, NULL, 0, 1, ?, ?)`,
-        [entry.title, category, entry.content, now, now],
+         VALUES (?, ?, ?, ?, NULL, NULL, ?, 1, ?, ?)`,
+        [
+          entry.title,
+          category,
+          entry.sourceType || 'TEXT',
+          entry.content,
+          entry.pageCount || 0,
+          now,
+          now,
+        ],
       );
     }
   }

@@ -4,7 +4,7 @@ A production-ready monorepo with three deployable parts:
 
 | Folder | Stack | Purpose |
 | --- | --- | --- |
-| [`backend`](backend) | Node.js + Express + MySQL/SQLite + Gemini 2.5 Flash | Admin auth, global trading knowledge base, `/api/analyze-chart` vision endpoint |
+| [`backend`](backend) | Node.js + Express + MySQL 8 (SQLite fallback) + Gemini Vision | Admin auth, per-mode BINARY/FOREX knowledge base, `/api/analyze-chart` vision endpoint |
 | [`admin-dashboard`](admin-dashboard) | React 18 + Vite + TypeScript + Tailwind | Light-mode panel to manage text rules and multi-page PDFs |
 | [`mobile-app`](mobile-app) | React + Vite + TypeScript + Capacitor + Kotlin | Android app with a draggable floating overlay and MediaProjection screen analysis |
 
@@ -29,13 +29,39 @@ Android overlay ──screenshot + time + timezone──┘
 
 ## Quick start
 
-### 1. Backend (SQLite, no external database)
+### 0. Docker + MySQL (recommended: persistent data)
+
+MySQL is the primary store, so accounts, plans, activation codes, per-user
+trade settings and every BINARY/FOREX knowledge item survive restarts and
+redeploys in the named `mysql_data` volume.
+
+```bash
+cp .env.docker.example .env  # set MySQL passwords, JWT_SECRET, admin, GEMINI_API_KEY
+docker compose up -d --build
+docker compose logs -f backend
+```
+
+The API listens on `http://localhost:4000`. On boot it creates/migrates every
+table in MySQL and seeds the default plans, app settings, Terms/About pages,
+five BINARY strategies and four FOREX strategies (including the full manual
+text) when an entry is missing. Re-running `npm run seed` inside the container
+is idempotent:
+
+```bash
+docker compose exec backend npm run seed
+```
+
+Data survives `docker compose down` and `docker compose up`. Only
+`docker compose down -v` deletes the volume.
+
+### 1. Backend without Docker (SQLite fallback)
 
 ```bash
 cd backend
 cp .env.example .env         # set JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, GEMINI_API_KEY
+# for the zero-service path also set DB_CLIENT=sqlite
 npm install
-npm run migrate
+npm run migrate && npm run seed
 npm start                    # http://localhost:4000
 ```
 

@@ -65,6 +65,7 @@ class FloatingWidgetService : Service() {
         const val ACTION_DELIVER = "com.aitrading.assistant.action.DELIVER"
         const val ACTION_SET_MODE = "com.aitrading.assistant.action.SET_MODE"
         const val ACTION_SET_VOICE = "com.aitrading.assistant.action.SET_VOICE"
+        const val ACTION_SET_TRADE_SETTINGS = "com.aitrading.assistant.action.SET_TRADE_SETTINGS"
         const val ACTION_UPDATE_SERVER = "com.aitrading.assistant.action.UPDATE_SERVER"
 
         const val ACTION_ANALYSIS = "com.aitrading.assistant.event.ANALYSIS"
@@ -86,6 +87,16 @@ class FloatingWidgetService : Service() {
         const val KEY_USER_TOKEN = "user_token"
         const val KEY_MODE = "signal_mode"
         const val KEY_VOICE = "voice_enabled"
+
+        // The trader's saved per-mode preferences. They are mirrored into the
+        // analysis request so a background scan applies the same threshold,
+        // duration/timeframe and custom strategy as the React UI.
+        const val KEY_BINARY_MIN_CONFIDENCE = "binary_min_confidence"
+        const val KEY_BINARY_DURATION = "binary_duration_seconds"
+        const val KEY_BINARY_STRATEGY = "binary_strategy"
+        const val KEY_FOREX_MIN_CONFIDENCE = "forex_min_confidence"
+        const val KEY_FOREX_TIMEFRAME = "forex_timeframe"
+        const val KEY_FOREX_STRATEGY = "forex_strategy"
 
         const val MODE_BINARY = "BINARY"
         const val MODE_FOREX = "FOREX"
@@ -229,6 +240,17 @@ class FloatingWidgetService : Service() {
                     .putBoolean(KEY_VOICE, voiceEnabled)
                     .apply()
                 updateStatus(if (voiceEnabled) "Voice alerts on" else "Voice alerts off")
+            }
+
+            ACTION_SET_TRADE_SETTINGS -> {
+                cachedAnalysis = null
+                cachedAt = 0L
+                updateStatus("${modeLabel()} mode · trade settings updated")
+                if (isRunning) {
+                    handler.removeCallbacks(analysisLoop)
+                    if (!analyzing) captureAndAnalyze()
+                    handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
+                }
             }
 
             ACTION_UPDATE_SERVER -> {
@@ -806,14 +828,34 @@ class FloatingWidgetService : Service() {
         networkExecutor.execute {
             var connection: HttpURLConnection? = null
             try {
-                // Only the mode is sent: the server applies the user's saved
-                // minimum confidence, duration/timeframe and custom strategy.
+                // Send the mode plus the trader's saved preferences so the
+                // background scan uses exactly the same threshold, expiry /
+                // timeframe and custom strategy as the in-app scan.
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 val body = JSONObject()
                     .put("imageBase64", imageBase64)
                     .put("currentTime", now)
                     .put("timezone", timezone)
                     .put("mode", requestMode)
-                    .toString()
+
+                if (requestMode == MODE_FOREX) {
+                    body.put(
+                        "min_confidence",
+                        prefs.getInt(KEY_FOREX_MIN_CONFIDENCE, 70),
+                    )
+                    body.put("preferred_timeframe", prefs.getString(KEY_FOREX_TIMEFRAME, "15M"))
+                    body.put("user_custom_strategy", prefs.getString(KEY_FOREX_STRATEGY, ""))
+                } else {
+                    body.put(
+                        "min_confidence",
+                        prefs.getInt(KEY_BINARY_MIN_CONFIDENCE, 70),
+                    )
+                    body.put(
+                        "preferred_duration_seconds",
+                        prefs.getInt(KEY_BINARY_DURATION, 60),
+                    )
+                    body.put("user_custom_strategy", prefs.getString(KEY_BINARY_STRATEGY, ""))
+                }
 
                 val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
@@ -827,7 +869,7 @@ class FloatingWidgetService : Service() {
                 connection = conn
 
                 OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
-                    writer.write(body)
+                    writer.write(body.toString())
                     writer.flush()
                 }
 

@@ -99,6 +99,7 @@ const MODE_SCHEMAS = {
 };
 
 const CHART_READING_RULES = `HOW TO READ THE CHART (follow this order every time)
+0. VISUAL EVIDENCE FIRST: before deciding anything, describe to yourself what is actually drawn — the instrument, timeframe, the direction of the last 5-8 candles, the colour and body/wick ratio of the latest CLOSED candle, where price sits relative to the visible price axis, and the nearest support and resistance. Your decision must match that description. If you cannot describe it, return WAIT.
 1. MARKET STRUCTURE: identify the most recent swing highs and swing lows. Higher highs + higher lows = bullish structure. Lower highs + lower lows = bearish structure. A range = no structure.
 2. CANDLE SEQUENCE: compare the last 5-8 candles. Count consecutive green (bullish) versus red (bearish) closes, body size and expansion/contraction. Rising bodies in one colour mean that side is in control now — do not fight the current impulse unless there is clear exhaustion.
 3. CANDLE ANATOMY: long lower wicks = buyers defending; long upper wicks = sellers defending; small indecision bodies = no edge.
@@ -107,14 +108,22 @@ const CHART_READING_RULES = `HOW TO READ THE CHART (follow this order every time
 6. MOMENTUM: the most recent impulse leg tells you the current direction. Price above the recent swing low and making higher lows is bullish, even if a single candle is red.
 
 DECISION RULES — THIS IS WHERE MOST MODELS FAIL, SO BE STRICT
-- Direction must come from the evidence above, not from a default. Never default to SELL and never default to the next candle.
+ANTI-BIAS SELF-CHECK (answer all five internally, then decide)
+a. Latest closed candle: green/bullish or red/bearish, and is its body larger or smaller than the average of the previous five?
+b. Last three candles: how many close in the same direction as my signal? If the answer is zero, my signal must be justified by a completed reversal pattern at a level, otherwise it is WAIT.
+c. Location: is price nearer the top of the visible range (resistance risk for BUY) or the bottom (support risk for SELL)?
+d. Is the level that supports my trade actually visible and tested, or am I assuming one?
+e. Would a trader looking at this same screenshot agree with the direction within two seconds? If not, confidence must be below 60 and the signal WAIT.
+- Direction must come from the evidence above, not from a default. Never default to SELL and never default to the next candle. Never output SELL on a clearly rising chart or BUY on a clearly falling chart unless price is rejecting a major level with a completed reversal pattern.
+- Do not let the presence of a distant resistance above turn a bullish impulse into a SELL, and do not let a distant support below turn a bearish impulse into a BUY.
 - If the last 2-3 candles are strongly bullish and price is above support, a BUY on RUNNING_CANDLE or NEXT_CANDLE is correct; do not call it bearish because a resistance level exists far above.
 - If the last 2-3 candles are strongly bearish and price is below resistance, SELL is correct.
 - Signal against the immediate momentum is only allowed when price is rejecting a major level with a clear reversal pattern (engulfing, pin bar, double top/bottom, CHoCH).
 - If the structure and the last candles disagree, or the chart is unclear/too zoomed, return WAIT with a low confidence. A confident WAIT is better than a wrong BUY/SELL.
 - CANDLE ENTRY: use RUNNING_CANDLE when the current candle is already moving in the signal direction with momentum and the expiry fits inside its remaining time. Use NEXT_CANDLE when the setup is a reversal or breakout that needs the next candle's open/close confirmation.
 - Confidence must reflect confluence: 85-95 = strong trend + level + trigger; 70-84 = good setup with one missing confirmation; 50-69 = weak; below 50 = WAIT.
-- Entry, stop-loss and take-profit must be actual price levels read from the chart's price axis (forex mode). Stop loss goes beyond the structure that invalidates the idea; take profit goes toward the next level. Risk:reward must be at least 1:1.5 for a BUY or SELL.`;
+- Entry, stop-loss and take-profit must be actual price levels read from the chart's price axis (forex mode). Stop loss goes beyond the structure that invalidates the idea; take profit goes toward the next level. Risk:reward must be at least 1:1.5 for a BUY or SELL.
+- The active knowledge base is authoritative: apply its checklist, expiry/timeframe rules and WAIT filters to this specific chart. Quote the concrete rule that decided the trade in the reason (for example "bullish engulfing off EMA20 in an uptrend").`;
 
 const OUTPUT_RULES = `ABSOLUTE OUTPUT RULES
 1. Never ask questions, never apologise, never write prose. Output only the JSON object required by the response schema.
@@ -576,7 +585,7 @@ export async function analyzeChart({
     custom
       ? `TRADER'S CUSTOM STRATEGY (apply in addition to the library, never contradict the risk rules):\n${custom}`
       : 'TRADER CUSTOM STRATEGY: none supplied.',
-    `MODE-SPECIFIC KNOWLEDGE BASE (authoritative, ${activeEntries.length} active ${resolvedMode} entries):\n${knowledgeBlock}`,
+    `MODE-SPECIFIC KNOWLEDGE BASE (authoritative, ${activeEntries.length} active ${resolvedMode} entries). Use these rules to judge the chart, and never mix BINARY rules into FOREX or the reverse:\n${knowledgeBlock}`,
   ].join('\n\n');
 
   const models = await buildModelChain();
@@ -615,7 +624,7 @@ Trader timezone: ${timezone || 'unknown'}
 Minimum confidence: ${threshold}%
 ${resolvedMode === 'BINARY' ? `Preferred duration: ${preferredDuration || 60} seconds` : `Preferred timeframe: ${normalizeTimeframe(preferredTimeframe, '15M')}`}
 
-Read the candles and structure first, then return the JSON decision now.`,
+Read the chart in this order: latest candles, candle anatomy, structure, levels, momentum, then the knowledge-base checklist, then the anti-bias self-check. Only then return the JSON decision.`,
           },
         ]),
         Math.min(remaining, config.gemini.attemptTimeoutMs),

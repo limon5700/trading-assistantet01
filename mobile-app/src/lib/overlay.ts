@@ -12,6 +12,15 @@ export interface OverlayPermissionState {
   running: boolean;
 }
 
+export interface OverlayTradeSettings {
+  binaryMinConfidence: number;
+  binaryDurationSeconds: number;
+  binaryStrategy: string;
+  forexMinConfidence: number;
+  forexTimeframe: string;
+  forexStrategy: string;
+}
+
 export interface StartOverlayResult {
   /** Whether the MediaProjection consent dialog returned a usable grant. */
   started: boolean;
@@ -42,6 +51,12 @@ export interface TradingOverlayPlugin {
   setMode(options: { mode: SignalMode }): Promise<{ mode: SignalMode }>;
   /** Turns spoken signals on/off without restarting the widget. */
   setVoiceEnabled(options: { enabled: boolean }): Promise<{ enabled: boolean }>;
+  /**
+   * Mirrors the saved per-mode trade preferences into the widget so every
+   * background scan sends the same min_confidence, duration/timeframe and
+   * custom strategy as an in-app scan.
+   */
+  setTradeSettings(options: OverlayTradeSettings): Promise<OverlayTradeSettings>;
   /** Speaks a short confirmation so the user can verify TTS works. */
   testVoice(options?: { text?: string }): Promise<void>;
   /** Forces an immediate screenshot + analysis cycle. */
