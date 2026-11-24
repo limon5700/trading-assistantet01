@@ -98,32 +98,21 @@ const MODE_SCHEMAS = {
   },
 };
 
-const CHART_READING_RULES = `HOW TO READ THE CHART (follow this order every time)
-0. VISUAL EVIDENCE FIRST: before deciding anything, describe to yourself what is actually drawn — the instrument, timeframe, the direction of the last 5-8 candles, the colour and body/wick ratio of the latest CLOSED candle, where price sits relative to the visible price axis, and the nearest support and resistance. Your decision must match that description. If you cannot describe it, return WAIT.
-1. MARKET STRUCTURE: identify the most recent swing highs and swing lows. Higher highs + higher lows = bullish structure. Lower highs + lower lows = bearish structure. A range = no structure.
-2. CANDLE SEQUENCE: compare the last 5-8 candles. Count consecutive green (bullish) versus red (bearish) closes, body size and expansion/contraction. Rising bodies in one colour mean that side is in control now — do not fight the current impulse unless there is clear exhaustion.
-3. CANDLE ANATOMY: long lower wicks = buyers defending; long upper wicks = sellers defending; small indecision bodies = no edge.
-4. SUPPORT / RESISTANCE: locate the levels price has reacted to at least twice in the visible window, plus round numbers and the visible session high/low.
-5. TREND AND INDICATORS: if any moving average, Bollinger Band, RSI, MACD or volume is visible, use it as confirmation only. Never invent an indicator that is not drawn on the chart.
-6. MOMENTUM: the most recent impulse leg tells you the current direction. Price above the recent swing low and making higher lows is bullish, even if a single candle is red.
-
-DECISION RULES — THIS IS WHERE MOST MODELS FAIL, SO BE STRICT
-ANTI-BIAS SELF-CHECK (answer all five internally, then decide)
-a. Latest closed candle: green/bullish or red/bearish, and is its body larger or smaller than the average of the previous five?
-b. Last three candles: how many close in the same direction as my signal? If the answer is zero, my signal must be justified by a completed reversal pattern at a level, otherwise it is WAIT.
-c. Location: is price nearer the top of the visible range (resistance risk for BUY) or the bottom (support risk for SELL)?
-d. Is the level that supports my trade actually visible and tested, or am I assuming one?
-e. Would a trader looking at this same screenshot agree with the direction within two seconds? If not, confidence must be below 60 and the signal WAIT.
-- Direction must come from the evidence above, not from a default. Never default to SELL and never default to the next candle. Never output SELL on a clearly rising chart or BUY on a clearly falling chart unless price is rejecting a major level with a completed reversal pattern.
-- Do not let the presence of a distant resistance above turn a bullish impulse into a SELL, and do not let a distant support below turn a bearish impulse into a BUY.
-- If the last 2-3 candles are strongly bullish and price is above support, a BUY on RUNNING_CANDLE or NEXT_CANDLE is correct; do not call it bearish because a resistance level exists far above.
-- If the last 2-3 candles are strongly bearish and price is below resistance, SELL is correct.
-- Signal against the immediate momentum is only allowed when price is rejecting a major level with a clear reversal pattern (engulfing, pin bar, double top/bottom, CHoCH).
-- If the structure and the last candles disagree, or the chart is unclear/too zoomed, return WAIT with a low confidence. A confident WAIT is better than a wrong BUY/SELL.
-- CANDLE ENTRY: use RUNNING_CANDLE when the current candle is already moving in the signal direction with momentum and the expiry fits inside its remaining time. Use NEXT_CANDLE when the setup is a reversal or breakout that needs the next candle's open/close confirmation.
-- Confidence must reflect confluence: 85-95 = strong trend + level + trigger; 70-84 = good setup with one missing confirmation; 50-69 = weak; below 50 = WAIT.
-- Entry, stop-loss and take-profit must be actual price levels read from the chart's price axis (forex mode). Stop loss goes beyond the structure that invalidates the idea; take profit goes toward the next level. Risk:reward must be at least 1:1.5 for a BUY or SELL.
-- The active knowledge base is authoritative: apply its checklist, expiry/timeframe rules and WAIT filters to this specific chart. Quote the concrete rule that decided the trade in the reason (for example "bullish engulfing off EMA20 in an uptrend").`;
+const CHART_READING_RULES = `HOW TO ANALYSE (knowledge-driven, evidence-first, no guessing)
+0. EVIDENCE FIRST: describe to yourself what is actually drawn — the instrument, the timeframe, the direction of the last 5-8 candles, the colour and body/wick ratio of the latest CLOSED candle, the visible swing highs and lows, and the nearest support and resistance. Every claim in your reason must be visible in the screenshot. If the chart cannot be read, return WAIT.
+1. DECIDE FROM TWO KNOWLEDGE SOURCES, IN THIS ORDER:
+   a. THE ACTIVE KNOWLEDGE LIBRARY below — the BINARY or FOREX entries extracted from this trader's strategy books and manuals. It is the authority for this mode: its entry conditions, confirmation rules, expiry/timeframe rules and invalidation rules decide the trade. Never mix BINARY rules into FOREX or the reverse.
+   b. YOUR OWN EXPERT KNOWLEDGE of price action, candlestick behaviour, market structure, support and resistance, trendlines, supply and demand, Smart Money Concepts (HH/HL, BOS, CHoCH, order blocks, fair value gaps, liquidity sweeps) and the standard indicators (RSI, Bollinger Bands, EMA). Use it to read the chart and to fill the gaps the library does not cover — but never to contradict a library rule.
+2. DECIDE BY RULE SATISFACTION, NOT BY OPINION:
+   - Name the specific library rule (or, when the library is silent, the specific classical principle) the setup satisfies and quote it in the reason.
+   - Check that rule's invalidation conditions on this chart. Any invalidation present means the rule is not satisfied.
+   - If no rule's entry conditions are fully met, the answer is WAIT. Having a directional opinion is not the same as having a setup.
+   - If two valid rules point in opposite directions, the conflict resolves to WAIT.
+3. READ THE SETUP IN CONTEXT: market structure, candle sequence and momentum, candle anatomy (long lower wick = buyers defending, long upper wick = sellers defending, small bodies = indecision), the level price is reacting to, and where price sits inside the visible range. Direction comes from that evidence — never from a default.
+4. CANDLE ENTRY: RUNNING_CANDLE when the current candle is already moving in the signal direction and the expiry fits inside its remaining time; NEXT_CANDLE when the setup needs the next candle's open or close to confirm.
+5. CONFIDENCE must be honest and reflect confluence: 85-95 = a library rule fully satisfied with trend, level and trigger aligned; 70-84 = a valid rule with one confirmation missing; 50-69 = weak or partly conflicting; below 50 = no trade. Never inflate confidence to clear the trader's threshold.
+6. FOREX PRICES: entry, stop-loss and take-profit must be actual levels read from the chart's price axis. The stop goes beyond the structure that invalidates the idea, the target goes toward the next level, and risk:reward must be at least 1:1.5 — otherwise WAIT.
+7. NO WRONG SIGNAL: never invent a level, indicator or rule that is not visible or not in the library. When the evidence is incomplete or the setup is unconfirmed, return WAIT with a low confidence. A missed trade costs nothing; a wrong BUY or SELL costs money.`;
 
 const OUTPUT_RULES = `ABSOLUTE OUTPUT RULES
 1. Never ask questions, never apologise, never write prose. Output only the JSON object required by the response schema.
@@ -270,6 +259,46 @@ function spokenTimeframe(timeframe) {
  * the requested mode. Anything missing is repaired from the chart context, and
  * the response is never returned unvalidated.
  */
+/** A directional call below this confidence is never spoken, whatever the user threshold. */
+const MIN_DIRECTIONAL_CONFIDENCE = 50;
+/** Forex plans below this reward:risk are skipped instead of being published. */
+const MIN_RISK_REWARD = 1.5;
+
+function toPrice(value) {
+  const numeric = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+}
+
+/**
+ * Deterministic checks on a forex plan: the levels must exist, must sit on the
+ * correct side of the entry, and the reward must justify the risk. Returns the
+ * list of reasons the signal must not be spoken.
+ */
+function forexSafetyProblems(signal, prices) {
+  const entry = toPrice(prices.entry);
+  const stop = toPrice(prices.stop);
+  const target = toPrice(prices.target);
+  if (entry === null || stop === null || target === null) {
+    return ['entry, stop-loss and take-profit must all be readable chart prices'];
+  }
+
+  if (signal === 'BUY') {
+    if (stop >= entry) return ['stop-loss is not below the entry for a BUY'];
+    if (target <= entry) return ['take-profit is not above the entry for a BUY'];
+  } else {
+    if (stop <= entry) return ['stop-loss is not above the entry for a SELL'];
+    if (target >= entry) return ['take-profit is not below the entry for a SELL'];
+  }
+
+  const risk = Math.abs(entry - stop);
+  const reward = Math.abs(target - entry);
+  if (!risk || reward / risk < MIN_RISK_REWARD) {
+    return [`risk:reward is below 1:${MIN_RISK_REWARD}`];
+  }
+
+  return [];
+}
+
 export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDuration = null }) {
   if (!raw || typeof raw !== 'object') throw new Error('Model returned no JSON object');
 
@@ -290,10 +319,33 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
   const reason = compact(raw.reason, 240) || 'No clear setup detected.';
   const threshold = Math.max(0, Math.min(100, Math.round(Number(minConfidence) || 0)));
 
-  // Threshold rule: a signal that does not meet the trader's minimum confidence
-  // becomes an explicit WAIT, with the spoken line the app promises.
-  const finalSignal = signal === 'WAIT' || confidence < threshold ? 'WAIT' : signal;
-  const thresholdApplied = finalSignal === 'WAIT' && signal !== 'WAIT';
+  // Safety gate: every directional signal must survive these deterministic
+  // checks before it reaches the trader. Anything that fails is downgraded to
+  // an explicit WAIT with the blocking reason, so the app never speaks a
+  // signal the model itself did not justify.
+  const blockers = [];
+  if (signal !== 'WAIT' && confidence < threshold) {
+    blockers.push(`confidence ${confidence}% is below your ${threshold}% threshold`);
+  }
+  if (signal !== 'WAIT' && confidence < MIN_DIRECTIONAL_CONFIDENCE) {
+    blockers.push(`confidence ${confidence}% is below the ${MIN_DIRECTIONAL_CONFIDENCE}% safety floor`);
+  }
+
+  const forexPrices =
+    resolvedMode === 'FOREX'
+      ? {
+          entry: priceString(raw.entry_price),
+          stop: priceString(raw.stop_loss),
+          target: priceString(raw.take_profit),
+        }
+      : null;
+
+  if (forexPrices && signal !== 'WAIT') {
+    blockers.push(...forexSafetyProblems(signal, forexPrices));
+  }
+
+  const finalSignal = signal !== 'WAIT' && blockers.length ? 'WAIT' : signal;
+  const blocked = finalSignal === 'WAIT' && signal !== 'WAIT';
 
   const base = {
     mode: resolvedMode,
@@ -301,16 +353,14 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
     confidence,
     asset,
     candle_entry: candleEntry,
-    reason: thresholdApplied
-      ? `${reason} (confidence ${confidence}% is below your ${threshold}% threshold)`.slice(0, 260)
-      : reason,
+    reason: blocked ? `${reason} (Blocked: ${blockers[0]})`.slice(0, 260) : reason,
   };
 
   if (resolvedMode === 'BINARY') {
     const durationSeconds = normalizeDuration(raw.duration_seconds ?? raw.duration, preferredDuration);
     const voiceSummary =
-      thresholdApplied || finalSignal === 'WAIT'
-        ? 'Wait, market confidence is below your threshold.'
+      finalSignal === 'WAIT'
+        ? 'No confirmed setup right now, wait for the next signal.'
         : compact(raw.voice_summary, 240) ||
           `Binary ${SIGNAL_LABELS[finalSignal]} signal on ${spokenAsset(asset)}, ${spokenCandle(
             candleEntry,
@@ -327,8 +377,8 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
 
   const timeframe = normalizeTimeframe(raw.timeframe ?? raw.timeframe_detected, '15M');
   const voiceSummary =
-    thresholdApplied || finalSignal === 'WAIT'
-      ? 'Wait, market confidence is below your threshold.'
+    finalSignal === 'WAIT'
+      ? 'No confirmed setup right now, wait for the next signal.'
       : compact(raw.voice_summary, 240) ||
         `Forex ${SIGNAL_LABELS[finalSignal]} signal on ${spokenAsset(asset)}, ${spokenTimeframe(
           timeframe,
@@ -337,9 +387,9 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
   return {
     ...base,
     timeframe,
-    entry_price: priceString(raw.entry_price),
-    stop_loss: priceString(raw.stop_loss),
-    take_profit: priceString(raw.take_profit),
+    entry_price: forexPrices?.entry ?? '—',
+    stop_loss: forexPrices?.stop ?? '—',
+    take_profit: forexPrices?.target ?? '—',
     voice_summary: voiceSummary,
   };
 }
@@ -585,7 +635,7 @@ export async function analyzeChart({
     custom
       ? `TRADER'S CUSTOM STRATEGY (apply in addition to the library, never contradict the risk rules):\n${custom}`
       : 'TRADER CUSTOM STRATEGY: none supplied.',
-    `MODE-SPECIFIC KNOWLEDGE BASE (authoritative, ${activeEntries.length} active ${resolvedMode} entries). Use these rules to judge the chart, and never mix BINARY rules into FOREX or the reverse:\n${knowledgeBlock}`,
+    `MODE-SPECIFIC KNOWLEDGE BASE (authoritative, ${activeEntries.length} active ${resolvedMode} entries, extracted from the trader's books and manuals). Judge the chart against these rules first, combine them with your own market expertise, and never mix BINARY rules into FOREX or the reverse:\n${knowledgeBlock}`,
   ].join('\n\n');
 
   const models = await buildModelChain();
@@ -624,7 +674,7 @@ Trader timezone: ${timezone || 'unknown'}
 Minimum confidence: ${threshold}%
 ${resolvedMode === 'BINARY' ? `Preferred duration: ${preferredDuration || 60} seconds` : `Preferred timeframe: ${normalizeTimeframe(preferredTimeframe, '15M')}`}
 
-Read the chart in this order: latest candles, candle anatomy, structure, levels, momentum, then the knowledge-base checklist, then the anti-bias self-check. Only then return the JSON decision.`,
+Read the chart first, then apply the active knowledge library together with your own market knowledge, name the rule that decided the trade, and only then return the JSON decision. If no rule is satisfied, return WAIT.`,
           },
         ]),
         Math.min(remaining, config.gemini.attemptTimeoutMs),
