@@ -51,10 +51,12 @@ export const config = {
     // Hard-locked on purpose: one Flash model only, never read from the
     // environment, so no deployment can quietly point a scan at another model.
     model: 'gemini-flash-lite-latest',
-    timeoutMs: int('GEMINI_TIMEOUT_MS', 60000),
-    // Ceiling for the single model call; a stalled model must not eat the whole
-    // scan budget, so the request fails with a timeout instead of queueing more.
-    attemptTimeoutMs: int('GEMINI_ATTEMPT_TIMEOUT_MS', 20000),
+    timeoutMs: int('GEMINI_TIMEOUT_MS', 75000),
+    // Ceiling for one model call. A chart screenshot plus a full knowledge
+    // library measures 10-30 s on gemini-flash-lite-latest, so a 20 s ceiling
+    // rejected healthy scans as timeouts; 35 s leaves room for a slow one and
+    // still allows a single retry inside the 75 s scan budget.
+    attemptTimeoutMs: int('GEMINI_ATTEMPT_TIMEOUT_MS', 35000),
     maxKnowledgeChars: int('MAX_KNOWLEDGE_CHARS', 120000),
   },
   // MySQL is the only store: accounts, plans, codes, trade settings, CMS pages

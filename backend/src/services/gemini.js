@@ -410,9 +410,11 @@ function analysisError(message, status, code) {
 const modelCooldown = new Map();
 /** Models this key rejected outright (404): retired for new keys, never retried. */
 const retiredModels = new Set();
-const COOLDOWN_TRANSIENT_MS = 60 * 1000;
 /** A model that used up its free quota stays out of the chain for a while. */
 const COOLDOWN_QUOTA_MS = 15 * 60 * 1000;
+/** One immediate retry of the same model for a timeout, a 5xx or a bad answer. */
+const MAX_ATTEMPTS_PER_MODEL = 2;
+const TRANSIENT_RETRY_DELAY_MS = 1200;
 
 function isCoolingDown(name) {
   if (retiredModels.has(name)) return true;
@@ -430,35 +432,59 @@ function cooldownLeft(name) {
 }
 
 /**
- * Remembers why a model failed so the next analysis does not pay for the same
- * rejection: a retired model leaves the chain for the whole process, a model
- * out of free quota rests for fifteen minutes, a transient failure for a
- * minute. Each reason is logged once, never on every analysis.
+ * True only for a rejection that says this key cannot use this model at all:
+ * an HTTP 404 or an explicit unknown-model message. A generic "not supported"
+ * is deliberately not enough, because Google uses it for recoverable 400s
+ * (an unsupported generation option) and retiring the only model would take
+ * analysis down until the process restarts.
  */
-function quarantineModel(name, error, haystack, code) {
-  const retired =
+function looksLikeUnknownModel(error, haystack) {
+  return (
     Number(error?.status) === 404 ||
-    /404|not found|not supported|unsupported|does not exist|no longer available/.test(haystack);
-  if (retired) {
+    /\b404\b/.test(haystack) ||
+    /is not found for api version/.test(haystack) ||
+    /models\/[\w.-]+ is not found/.test(haystack) ||
+    haystack.includes('no longer available') ||
+    haystack.includes('is not supported for generatecontent')
+  );
+}
+
+/**
+ * Records why a model failed. Only a rejection the whole key shares (404) or a
+ * drained free quota is worth taking the model out of the chain, because those
+ * cannot succeed on the next scan either. A timeout, a 5xx, an unparseable
+ * answer or a blocked screenshot is this scan's problem, so the model stays
+ * available: benching the only model would turn one hiccup into a minute of
+ * "model is resting" 503s for every trader.
+ */
+function noteModelFailure(name, error, haystack, code) {
+  const reason = compact(error?.message || error, 240) || 'unknown error';
+  if (looksLikeUnknownModel(error, haystack)) {
     retiredModels.add(name);
     modelCooldown.delete(name);
-    console.warn(`[gemini] ${name} is retired for this key, dropping it from the chain`);
+    console.warn(`[gemini] ${name} is retired for this key, dropping it from the chain (${reason})`);
     return;
   }
   if (code === 'GEMINI_QUOTA_EXCEEDED' || /429|quota|resource_exhausted|rate limit/.test(haystack)) {
     modelCooldown.set(name, Date.now() + COOLDOWN_QUOTA_MS);
-    console.warn(`[gemini] ${name} is out of free quota, resting ${COOLDOWN_QUOTA_MS / 60000} minutes`);
+    console.warn(
+      `[gemini] ${name} is out of free quota, resting ${COOLDOWN_QUOTA_MS / 60000} minutes (${reason})`,
+    );
     return;
   }
-  modelCooldown.set(name, Date.now() + COOLDOWN_TRANSIENT_MS);
-  console.warn(`[gemini] ${name} failed, resting ${COOLDOWN_TRANSIENT_MS / 1000} seconds`);
+  console.warn(`[gemini] ${name} failed this scan but stays available: ${reason}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
  * The single model every scan calls. This is deliberately not configurable: the
  * assistant uses gemini-flash-lite-latest and nothing else, so a dead or drained
  * model can never turn one scan into a catalogue walk that ends in a timeout.
- * A model that just failed rests, and the caller is told for how long.
+ * Only a retired model or a drained quota takes it out of the chain, and the
+ * caller is told how long to wait.
  */
 function buildModelChain() {
   const model = config.gemini.model;
@@ -480,13 +506,21 @@ function buildModelChain() {
 }
 
 /**
- * Turns an SDK error into an actionable API error. Only a key or project
- * permission failure is final; a retired model, an overloaded or drained one, a
- * timeout or malformed JSON is reported as-is, because there is no second model
- * to fall back to.
+ * Turns an SDK error into an actionable API error plus a kind that decides what
+ * happens next: "fatal" is thrown back at once, "quota" benches the model and
+ * is thrown, and "transient" (a timeout, a 5xx, an unparseable answer) earns one
+ * retry of the same model without benching it.
  */
 function describeGeminiError(error) {
-  if (error?.status && error?.code) return { error, retryModel: error.code !== 'GEMINI_KEY_INVALID' };
+  if (error?.status && error?.code) {
+    const kind =
+      error.code === 'GEMINI_QUOTA_EXCEEDED'
+        ? 'quota'
+        : error.code === 'GEMINI_KEY_INVALID' || error.code === 'GEMINI_PERMISSION_DENIED'
+          ? 'fatal'
+          : 'transient';
+    return { error, kind };
+  }
 
   const message = String(error?.message || error || 'Unknown Gemini error');
   const details = JSON.stringify(error?.errorDetails ?? error?.response?.data ?? '');
@@ -499,7 +533,7 @@ function describeGeminiError(error) {
         502,
         'GEMINI_KEY_INVALID',
       ),
-      retryModel: false,
+      kind: 'fatal',
     };
   }
   if (
@@ -513,7 +547,17 @@ function describeGeminiError(error) {
         502,
         'GEMINI_PERMISSION_DENIED',
       ),
-      retryModel: false,
+      kind: 'fatal',
+    };
+  }
+  if (looksLikeUnknownModel(error, haystack)) {
+    return {
+      error: analysisError(
+        `Gemini rejected "${config.gemini.model}" for this API key (unknown or unsupported model). Check the key and its project access.`,
+        503,
+        'GEMINI_MODEL_UNAVAILABLE',
+      ),
+      kind: 'fatal',
     };
   }
   if (
@@ -528,7 +572,7 @@ function describeGeminiError(error) {
         503,
         'GEMINI_QUOTA_EXCEEDED',
       ),
-      retryModel: true,
+      kind: 'quota',
     };
   }
   if (haystack.includes('safety') || haystack.includes('blocked')) {
@@ -538,11 +582,11 @@ function describeGeminiError(error) {
         422,
         'GEMINI_BLOCKED',
       ),
-      retryModel: true,
+      kind: 'fatal',
     };
   }
 
-  return { error, retryModel: true };
+  return { error, kind: 'transient' };
 }
 
 function parseModelJson(text) {
@@ -602,68 +646,79 @@ export async function analyzeChart({
   let lastError = null;
 
   for (const modelName of models) {
-    const remaining = deadline - Date.now();
-    if (remaining < 4000) {
-      lastError = analysisError('Gemini request timed out', 504, 'GEMINI_TIMEOUT');
-      break;
-    }
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt += 1) {
+      const remaining = deadline - Date.now();
+      if (remaining < 4000) {
+        lastError = analysisError('Gemini request timed out', 504, 'GEMINI_TIMEOUT');
+        break;
+      }
 
-    const model = genAI.getGenerativeModel({
-      model: modelName,
-      systemInstruction,
-      generationConfig: {
-        temperature: 0.2,
-        topP: 0.9,
-        maxOutputTokens: 2048,
-        responseMimeType: 'application/json',
-        responseSchema: MODE_SCHEMAS[resolvedMode],
-      },
-    });
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction,
+        generationConfig: {
+          temperature: 0.2,
+          topP: 0.9,
+          maxOutputTokens: 2048,
+          responseMimeType: 'application/json',
+          responseSchema: MODE_SCHEMAS[resolvedMode],
+        },
+      });
 
-    attempted.push(modelName);
-    try {
-      const result = await withTimeout(
-        model.generateContent([
-          { inlineData: { mimeType, data: imageBase64 } },
-          {
-            text: `Analyse this chart screenshot for a ${resolvedMode} trade.
+      attempted.push(modelName);
+      try {
+        const result = await withTimeout(
+          model.generateContent([
+            { inlineData: { mimeType, data: imageBase64 } },
+            {
+              text: `Analyse this chart screenshot for a ${resolvedMode} trade.
 Trader local time: ${currentTime || 'unknown'}
 Trader timezone: ${timezone || 'unknown'}
 Minimum confidence: ${threshold}%
 ${resolvedMode === 'BINARY' ? `Preferred duration: ${preferredDuration || 60} seconds` : `Preferred timeframe: ${normalizeTimeframe(preferredTimeframe, '15M')}`}
 
 Read the chart first, then apply the active knowledge library together with your own market knowledge, name the rule that decided the trade, and only then return the JSON decision. If no rule is satisfied, return WAIT.`,
-          },
-        ]),
-        Math.min(remaining, config.gemini.attemptTimeoutMs),
-      );
+            },
+          ]),
+          Math.min(remaining, config.gemini.attemptTimeoutMs),
+        );
 
-      const parsed = parseModelJson(result.response.text());
-      const analysis = validateAnalysis(parsed, {
-        mode: resolvedMode,
-        minConfidence: threshold,
-        preferredDuration,
-      });
-      modelCooldown.delete(modelName);
-      return {
-        analysis,
-        knowledgeEntriesUsed: activeEntries.length,
-        model: modelName,
-        modelsAttempted: attempted,
-      };
-    } catch (error) {
-      const timedOut = String(error?.message || '').includes('timed out');
-      const { error: mapped, retryModel } = timedOut
-        ? { error: analysisError('Gemini request timed out', 504, 'GEMINI_TIMEOUT'), retryModel: true }
-        : describeGeminiError(error);
-      lastError = mapped;
-      if (!retryModel) throw mapped;
-      quarantineModel(
-        modelName,
-        error,
-        `${error?.message || ''} ${mapped.message}`.toLowerCase(),
-        mapped.code,
-      );
+        const parsed = parseModelJson(result.response.text());
+        const analysis = validateAnalysis(parsed, {
+          mode: resolvedMode,
+          minConfidence: threshold,
+          preferredDuration,
+        });
+        modelCooldown.delete(modelName);
+        return {
+          analysis,
+          knowledgeEntriesUsed: activeEntries.length,
+          model: modelName,
+          modelsAttempted: attempted,
+        };
+      } catch (error) {
+        const timedOut = String(error?.message || '').includes('timed out');
+        const { error: mapped, kind } = timedOut
+          ? { error: analysisError('Gemini request timed out', 504, 'GEMINI_TIMEOUT'), kind: 'transient' }
+          : describeGeminiError(error);
+        lastError = mapped;
+        noteModelFailure(
+          modelName,
+          error,
+          `${error?.message || ''} ${mapped.message}`.toLowerCase(),
+          mapped.code,
+        );
+        // A bad key, a revoked permission, a blocked screenshot or a drained
+        // quota will not improve by asking again: report it now.
+        if (kind === 'fatal' || kind === 'quota') throw mapped;
+        // A scan that already spent its whole attempt budget will most likely
+        // time out again on a second try, so only fast failures get the retry.
+        if (timedOut) throw mapped;
+        const retryBudget = deadline - Date.now();
+        if (attempt === MAX_ATTEMPTS_PER_MODEL || retryBudget < 6000) throw mapped;
+        console.warn(`[gemini] ${modelName} retrying once after: ${mapped.message}`);
+        await sleep(TRANSIENT_RETRY_DELAY_MS);
+      }
     }
   }
 
