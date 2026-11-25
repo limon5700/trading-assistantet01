@@ -107,7 +107,7 @@ router.post('/signup', authLimiter, async (req, res, next) => {
       ...(await sessionPayload(user)),
     });
   } catch (err) {
-    if (err?.code === 'SQLITE_CONSTRAINT' || err?.code === 'ER_DUP_ENTRY') {
+    if (err?.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ error: 'This email or username is already registered' });
     }
     return next(err);

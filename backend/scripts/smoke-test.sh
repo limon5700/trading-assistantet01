@@ -7,11 +7,31 @@ export ADMIN_EMAIL=admin@test.local
 export ADMIN_PASSWORD=testpass123
 export JWT_SECRET=test-secret-for-smoke-test
 export GEMINI_API_KEY=dummy-key
-export DB_CLIENT=sqlite
-export SQLITE_PATH=./data/smoke_test.db
 export CORS_ORIGINS=
 
-rm -f data/smoke_test.db data/smoke_test.db-shm data/smoke_test.db-wal
+# MySQL only: point these at a running server. The suite drops and recreates
+# the scratch database below, so never aim it at real data.
+export DB_HOST=${DB_HOST:-127.0.0.1}
+export DB_PORT=${DB_PORT:-3306}
+export DB_USER=${DB_USER:-root}
+export DB_PASS=${DB_PASS:-}
+export DB_NAME=${DB_NAME:-ai_trading_smoke}
+
+node -e 'import("mysql2/promise").then(async (m) => {
+  const name = String(process.env.DB_NAME).replace(/`/g, "");
+  const c = await m.createConnection({
+    host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT),
+    user: process.env.DB_USER,
+    password: process.env.DB_PASS,
+  });
+  await c.query(`DROP DATABASE IF EXISTS \`${name}\``);
+  await c.query(`CREATE DATABASE \`${name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  await c.end();
+}).catch((error) => {
+  console.error("[smoke] MySQL is not reachable:", error.message);
+  process.exit(1);
+})' || exit 1
 npm run migrate --silent || exit 1
 
 node src/server.js > /tmp/backend-smoke.log 2>&1 &
@@ -78,34 +98,18 @@ check "admin users requires auth" 401 "$(code "$B/api/admin/users")"
 check "admin lists users" 200 "$(code "$B/api/admin/users?search=trader" -H "Authorization: Bearer $ADMIN_TOKEN")"
 check "admin user found" 1 "$(field "d['total']")"
 
-# --- seeded strategy libraries ------------------------------------------
+# --- knowledge libraries start empty (no built-in seed data) ------------
 code "$B/api/admin/knowledge?category=BINARY" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
-check "binary strategies seeded" 5 "$(field "d['count']")"
-check "seeded entries carry category" "BINARY" "$(field "d['items'][0]['category']")"
+check "binary library starts empty" 0 "$(field "d['count']")"
 code "$B/api/admin/knowledge?category=FOREX" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
-check "forex strategies seeded" 4 "$(field "d['count']")"
-check "forex entries carry category" "FOREX" "$(field "d['items'][0]['category']")"
+check "forex library starts empty" 0 "$(field "d['count']")"
 check "bad category filter rejected" 400 "$(code "$B/api/admin/knowledge?category=STOCKS" -H "Authorization: Bearer $ADMIN_TOKEN")"
-
-# --- full manual text is seeded per mode -------------------------------
-code "$B/api/admin/knowledge?category=BINARY" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
-check "binary manual seeded" PDF_TEXT "$(field "next(i['source_type'] for i in d['items'] if i['source_type'] == 'PDF_TEXT')")"
-BINARY_MANUAL_ID=$(field "next(i['id'] for i in d['items'] if i['source_type'] == 'PDF_TEXT')")
-code "$B/api/admin/knowledge/$BINARY_MANUAL_ID" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
-check "binary manual has full text" "yes" "$(field "'yes' if len(d['item']['content']) > 3000 else 'no'")"
-check "binary manual names a manual" "yes" "$(field "'yes' if 'MANUAL' in d['item']['content'].upper() else 'no'")"
-code "$B/api/admin/knowledge?category=FOREX" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
-check "forex manual seeded" PDF_TEXT "$(field "next(i['source_type'] for i in d['items'] if i['source_type'] == 'PDF_TEXT')")"
-FOREX_MANUAL_ID=$(field "next(i['id'] for i in d['items'] if i['source_type'] == 'PDF_TEXT')")
-code "$B/api/admin/knowledge/$FOREX_MANUAL_ID" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
-check "forex manual has full text" "yes" "$(field "'yes' if len(d['item']['content']) > 3000 else 'no'")"
-check "forex manual covers SMC" "yes" "$(field "'yes' if 'ORDER BLOCK' in d['item']['content'].upper() else 'no'")"
 
 check "add binary text strategy" 201 "$(code -X POST "$B/api/admin/knowledge/text" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"Smoke binary rule","category":"BINARY","content":"Only trade with the 1M impulse after a level rejection.","is_active":true}')"
 NEW_KNOWLEDGE=$(field "d['item']['id']")
 check "new strategy category" BINARY "$(field "d['item']['category']")"
 code "$B/api/admin/knowledge?category=BINARY" -H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null
-check "binary library grew" 6 "$(field "d['count']")"
+check "binary library grew" 1 "$(field "d['count']")"
 check "strategy recategorised" 200 "$(code -X PUT "$B/api/admin/knowledge/$NEW_KNOWLEDGE" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"category":"FOREX"}')"
 check "strategy category now forex" FOREX "$(field "d['item']['category']")"
 check "invalid strategy category rejected" 400 "$(code -X POST "$B/api/admin/knowledge/text" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"title":"x","content":"y","category":"STOCKS"}')"

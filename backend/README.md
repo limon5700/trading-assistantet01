@@ -13,8 +13,8 @@ and never bundled into the dashboard or the Android app.
 
 ## Requirements
 
-- Node.js **>= 22.5** (SQLite uses the built-in `node:sqlite` module; Node 24+
-  is recommended). MySQL 8 is optional.
+- Node.js **>= 22.5** (Node 24+ is recommended).
+- A reachable **MySQL 8** server — it is the only database.
 
 ## Quick start (Docker + MySQL, persistent)
 
@@ -28,33 +28,18 @@ docker compose up -d --build
 
 `docker-compose.yml` runs `mysql:8.0` with the `mysql_data` volume and starts
 this API only after MySQL passes its healthcheck. On boot the server creates and
-migrates every table and seeds the default plans, settings, CMS pages and both
-strategy libraries. MySQL is the default `DB_CLIENT`.
+migrates every table and ensures the default plans, settings and CMS pages
+exist. MySQL is the only store — there is no SQLite path and no seed file.
 
 ```bash
-docker compose exec backend npm run seed   # idempotent re-seed
+docker compose exec backend npm run migrate   # idempotent schema check
 ```
 
-## Quick start (SQLite, zero external services)
-
-```bash
-cd backend
-cp .env.example .env
-# edit .env: set DB_CLIENT=sqlite, JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, GEMINI_API_KEY
-npm install
-npm run migrate && npm run seed
-npm start
-```
-
-The API listens on `http://localhost:4000` and the SQLite file is created at
-`backend/data/ai_trading.db` (configurable with `SQLITE_PATH`).
-
-## MySQL mode (without Docker)
+## Quick start (MySQL without Docker)
 
 Set in `.env`:
 
 ```env
-DB_CLIENT=mysql
 DB_HOST=127.0.0.1
 DB_PORT=3306
 DB_USER=app
@@ -62,23 +47,26 @@ DB_PASS=secret
 DB_NAME=ai_trading
 ```
 
-Then `npm run migrate` (or `npm run seed`), which creates and migrates every
-table — `users`, `plans`, `activation_codes`, `crypto_payments`, `app_settings`,
-`user_activities`, `cms_pages`, `user_trade_settings` and `knowledge_base` — and
-seeds the two strategy libraries. The server also runs the same migration and
-seed on boot, so a fresh database is usable immediately.
+Then:
+
+```bash
+cp .env.example .env
+# edit .env: DB_* values, JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, GEMINI_API_KEY
+npm install
+npm run migrate
+npm start
+```
+
+`npm run migrate` creates and migrates every table — `users`, `plans`,
+`activation_codes`, `crypto_payments`, `app_settings`, `user_activities`,
+`cms_pages`, `user_trade_settings` and `knowledge_base`. The server runs the same
+migration on boot, so a fresh database is usable immediately.
 
 ## Knowledge libraries
 
-`BINARY` and `FOREX` are separate libraries. Each ships four topic playbooks
-plus one full manual stored as `PDF_TEXT`:
-
-- **BINARY** — candlestick price action and rejection psychology; support,
-  resistance and trendline confluence; indicator confluence and expiry timing;
-  the strict WAIT/risk filter; the complete binary manual.
-- **FOREX** — smart money concepts (BOS, CHoCH, order blocks, FVG, liquidity);
-  supply, demand and Fibonacci; execution and risk management; the complete
-  forex manual.
+`BINARY` and `FOREX` are separate libraries and they start empty: every entry
+comes from the admin dashboard (typed text or an uploaded PDF), so the analysis
+only ever reads your real strategy material.
 
 Scans inject only the active entries of the requested mode, plus the trader's
 saved settings and custom strategy. Everything is editable from the dashboard,
@@ -165,9 +153,8 @@ marked `FAILED`.
 2. Build command: `npm install` — Start command: `npm start`.
 3. Add every variable from `.env.example` in the dashboard. Use
    `COOKIE_SECURE=true` and set `CORS_ORIGINS` to your dashboard URL.
-4. Add a managed MySQL (Railway MySQL / Render external DB) and set
-   `DB_CLIENT=mysql` plus the connection variables. SQLite on ephemeral
-   filesystems loses data on redeploy — use MySQL or a persistent disk.
+4. Add a managed MySQL (Railway MySQL / Render external DB) and set the
+   `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASS` / `DB_NAME` variables.
 5. Health check path: `/api/health`.
 
 ### VPS (systemd + Nginx)

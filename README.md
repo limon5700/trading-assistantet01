@@ -42,26 +42,25 @@ docker compose logs -f backend
 ```
 
 The API listens on `http://localhost:4000`. On boot it creates/migrates every
-table in MySQL and seeds the default plans, app settings, Terms/About pages,
-five BINARY strategies and four FOREX strategies (including the full manual
-text) when an entry is missing. Re-running `npm run seed` inside the container
-is idempotent:
+table in MySQL and ensures the two subscription plans, the settings keys and the
+Terms/About pages exist. No trading knowledge is inserted: the BINARY and FOREX
+libraries hold only what you upload from the admin dashboard. Re-running the
+migration is idempotent:
 
 ```bash
-docker compose exec backend npm run seed
+docker compose exec backend npm run migrate
 ```
 
 Data survives `docker compose down` and `docker compose up`. Only
 `docker compose down -v` deletes the volume.
 
-### 1. Backend without Docker (SQLite fallback)
+### 1. Backend without Docker (MySQL)
 
 ```bash
 cd backend
-cp .env.example .env         # set JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD, GEMINI_API_KEY
-# for the zero-service path also set DB_CLIENT=sqlite
+cp .env.example .env         # set DB_HOST/DB_USER/DB_PASS/DB_NAME, JWT_SECRET, admin, GEMINI_API_KEY
 npm install
-npm run migrate && npm run seed
+npm run migrate
 npm start                    # http://localhost:4000
 ```
 

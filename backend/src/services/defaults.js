@@ -1,16 +1,8 @@
 /**
- * Built-in trading knowledge shipped with the backend.
- *
- * The two libraries are kept in ./seeds so each mode has its own, clearly
- * separated playbook set: BINARY (price action, levels, indicators, expiry
- * timing, strict no-trade filter and the full manual) and FOREX (smart money
- * concepts, supply/demand with Fibonacci, execution/risk and the full manual).
- * Every entry is inserted into MySQL once and is fully editable in the admin
- * dashboard afterwards.
+ * Default CMS pages (Terms and About) installed once on an empty database so
+ * the public pages are never blank. Everything else lives in MySQL and is
+ * managed from the admin dashboard.
  */
-
-export { BINARY_STRATEGIES } from './seeds/binaryStrategies.js';
-export { FOREX_STRATEGIES } from './seeds/forexStrategies.js';
 
 export const DEFAULT_CMS_PAGES = [
   {

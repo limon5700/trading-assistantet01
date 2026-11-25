@@ -1,6 +1,6 @@
 # Production image for the AI Trading Assistant API.
 # Dependencies are installed from the lockfile, the runtime runs as `node`,
-# and the schema + seed data are created automatically on startup.
+# and the MySQL schema is created automatically on startup (no seed data).
 FROM node:22-bookworm-slim
 
 ENV NODE_ENV=production \

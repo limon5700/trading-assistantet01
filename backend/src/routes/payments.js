@@ -188,7 +188,6 @@ router.post('/verify-crypto', verifyLimiter, requireUser, async (req, res, next)
         await attachPaymentTxHash(payment.id, txHash);
       } catch (error) {
         if (
-          String(error?.code || '').includes('SQLITE_CONSTRAINT') ||
           String(error?.code || '').includes('ER_DUP_ENTRY') ||
           String(error?.message || '').toLowerCase().includes('unique')
         ) {

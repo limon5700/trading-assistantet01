@@ -407,21 +407,22 @@ function analysisError(message, status, code) {
 }
 
 /**
- * Known-good vision models, used in this order after the configured model and
- * as the offline fallback when the model list cannot be fetched.
+ * Live free-tier Flash models that answer our structured JSON signal, cheapest
+ * and fastest first. The retired 1.5/2.0/2.5 names are deliberately gone: a
+ * current key answers 404 for them, and every 404 is a wasted request plus a
+ * log line the trader should never have to read.
  */
 const PREFERRED_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
-  'gemini-flash-latest',
   'gemini-flash-lite-latest',
-  'gemini-2.5-pro',
-  'gemini-pro-latest',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
+  'gemini-flash-latest',
+  'gemini-3.8-flash',
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
 ];
+
+/** Only Flash-tier models are auto-discovered: those are the ones with free quota. */
+const FLASH_MODEL = /flash/i;
 
 const MODEL_LIST_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MODEL_CACHE_MS = 10 * 60 * 1000;
@@ -433,11 +434,15 @@ const NON_ANALYSIS_MODEL =
 let modelCache = { at: 0, models: [] };
 /** Models that recently failed, so the next scan does not pay for them again. */
 const modelCooldown = new Map();
-const COOLDOWN_MISSING_MS = 10 * 60 * 1000;
+/** Models this key rejected outright (404): retired for new keys, never retried. */
+const retiredModels = new Set();
 const COOLDOWN_TRANSIENT_MS = 60 * 1000;
+/** A model that used up its free quota stays out of the chain for a while. */
+const COOLDOWN_QUOTA_MS = 15 * 60 * 1000;
 let lastGoodModel = null;
 
 function isCoolingDown(name) {
+  if (retiredModels.has(name)) return true;
   const until = modelCooldown.get(name);
   if (!until) return false;
   if (until > Date.now()) return true;
@@ -445,9 +450,35 @@ function isCoolingDown(name) {
   return false;
 }
 
-function quarantineModel(name, error, haystack) {
-  const missing = Number(error?.status) === 404 || /404|not found|not supported|unsupported|does not exist/.test(haystack);
-  modelCooldown.set(name, Date.now() + (missing ? COOLDOWN_MISSING_MS : COOLDOWN_TRANSIENT_MS));
+/** Milliseconds until this model may be tried again (Infinity once retired). */
+function cooldownLeft(name) {
+  if (retiredModels.has(name)) return Infinity;
+  return Math.max(0, (modelCooldown.get(name) || 0) - Date.now());
+}
+
+/**
+ * Remembers why a model failed so the next analysis does not pay for the same
+ * rejection: a retired model leaves the chain for the whole process, a model
+ * out of free quota rests for fifteen minutes, a transient failure for a
+ * minute. Each reason is logged once, never on every analysis.
+ */
+function quarantineModel(name, error, haystack, code) {
+  const retired =
+    Number(error?.status) === 404 ||
+    /404|not found|not supported|unsupported|does not exist|no longer available/.test(haystack);
+  if (retired) {
+    retiredModels.add(name);
+    modelCooldown.delete(name);
+    console.warn(`[gemini] ${name} is retired for this key, dropping it from the chain`);
+    return;
+  }
+  if (code === 'GEMINI_QUOTA_EXCEEDED' || /429|quota|resource_exhausted|rate limit/.test(haystack)) {
+    modelCooldown.set(name, Date.now() + COOLDOWN_QUOTA_MS);
+    console.warn(`[gemini] ${name} is out of free quota, resting ${COOLDOWN_QUOTA_MS / 60000} minutes`);
+    return;
+  }
+  modelCooldown.set(name, Date.now() + COOLDOWN_TRANSIENT_MS);
+  console.warn(`[gemini] ${name} failed, resting ${COOLDOWN_TRANSIENT_MS / 1000} seconds`);
 }
 
 function isAnalysisModel(name) {
@@ -493,11 +524,23 @@ async function discoverModels() {
     const models = (payload?.models ?? [])
       .filter((model) => (model?.supportedGenerationMethods ?? []).includes('generateContent'))
       .map((model) => String(model.name || '').replace(/^models\//, ''))
-      .filter(isAnalysisModel);
+      .filter(isAnalysisModel)
+      // The cache is a catalogue: a quota-resting model must come back on its
+      // own, so only permanently retired names are dropped here. The chain
+      // applies the live cooldown state.
+      .filter((name) => !retiredModels.has(name));
 
     if (!models.length) throw new Error('model list was empty');
-    modelCache = { at: Date.now(), models: models.sort(compareModels) };
-    console.log(`[gemini] ${models.length} analysis models available`);
+    // Flash models carry the free quota, so they lead the list; a Pro model is
+    // only kept when this key has no usable Flash model at all.
+    const flash = models.filter((name) => FLASH_MODEL.test(name));
+    const usable = (flash.length ? flash : models).sort(compareModels);
+    modelCache = { at: Date.now(), models: usable };
+    console.log(
+      `[gemini] ${usable.length} usable ${flash.length ? 'flash ' : ''}models (fastest first: ${usable
+        .slice(0, 4)
+        .join(', ')})`,
+    );
     return modelCache.models;
   } catch (error) {
     console.warn(`[gemini] could not list models: ${error?.message || error}`);
@@ -513,13 +556,27 @@ async function discoverModels() {
  */
 async function buildModelChain() {
   const discovered = await discoverModels();
-  const chain = [config.gemini.model, lastGoodModel, ...PREFERRED_MODELS, ...discovered]
+  // The model that answered last time leads, so a healthy chain starts with an
+  // attempt that is known to work instead of the configured default.
+  const ordered = [lastGoodModel, config.gemini.model, ...PREFERRED_MODELS, ...discovered]
     .map((name) => String(name || '').trim())
     .filter(Boolean);
 
-  const unique = [...new Set(chain)];
+  const unique = [...new Set(ordered)].filter((name) => !retiredModels.has(name));
   const healthy = unique.filter((name) => !isCoolingDown(name));
-  return (healthy.length ? healthy : unique).slice(0, config.gemini.maxModelAttempts);
+  if (healthy.length) return healthy.slice(0, config.gemini.maxModelAttempts);
+
+  // Nothing is ready. Failing with the wait time is better than firing calls
+  // that can only answer 404 or QUOTA_EXCEEDED.
+  const waitMs = Math.min(...unique.map(cooldownLeft));
+  const seconds = Number.isFinite(waitMs) ? Math.max(1, Math.ceil(waitMs / 1000)) : null;
+  throw analysisError(
+    seconds
+      ? `No Gemini model is available right now (retired or out of quota). Try again in ${seconds} seconds.`
+      : 'No usable Gemini model is configured. Check GEMINI_MODEL and the API key.',
+    503,
+    'GEMINI_MODELS_COOLING_DOWN',
+  );
 }
 
 /**
@@ -701,8 +758,12 @@ Read the chart first, then apply the active knowledge library together with your
         : describeGeminiError(error);
       lastError = mapped;
       if (!retryModel) throw mapped;
-      quarantineModel(modelName, error, `${error?.message || ''} ${mapped.message}`.toLowerCase());
-      console.warn(`[gemini] ${modelName} failed (${mapped.code || mapped.status || 'error'}), trying the next model`);
+      quarantineModel(
+        modelName,
+        error,
+        `${error?.message || ''} ${mapped.message}`.toLowerCase(),
+        mapped.code,
+      );
     }
   }
 

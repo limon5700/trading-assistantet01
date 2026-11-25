@@ -29,15 +29,6 @@ function bool(name, fallback = false) {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
-// MySQL is the primary, persistent store. SQLite remains available as an
-// explicit fallback for offline development and the smoke test.
-const dbClient = (process.env.DB_CLIENT || 'mysql').trim().toLowerCase();
-if (!['mysql', 'sqlite'].includes(dbClient)) {
-  throw new Error('DB_CLIENT must be either "mysql" or "sqlite"');
-}
-
-const sqlitePath = path.resolve(backendRoot, process.env.SQLITE_PATH || './data/ai_trading.db');
-
 export const config = {
   port: int('PORT', 4000),
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -60,25 +51,23 @@ export const config = {
     model: process.env.GEMINI_MODEL || 'gemini-flash-lite-latest',
     timeoutMs: int('GEMINI_TIMEOUT_MS', 60000),
     // Total analysis models tried before the request gives up (failover chain).
-    maxModelAttempts: int('GEMINI_MAX_MODEL_ATTEMPTS', 8),
+    maxModelAttempts: int('GEMINI_MAX_MODEL_ATTEMPTS', 4),
     // Per-model ceiling; a stalled model must not eat the whole scan budget.
     attemptTimeoutMs: int('GEMINI_ATTEMPT_TIMEOUT_MS', 20000),
     maxKnowledgeChars: int('MAX_KNOWLEDGE_CHARS', 120000),
   },
+  // MySQL is the only store: accounts, plans, codes, trade settings, CMS pages
+  // and every BINARY/FOREX knowledge entry live in the real database.
   db: {
-    client: dbClient,
-    mysql: {
-      host: process.env.DB_HOST || 'localhost',
-      port: int('DB_PORT', 3306),
-      user: process.env.DB_USER || 'root',
-      password: process.env.DB_PASS || '',
-      database: process.env.DB_NAME || 'ai_trading',
-      // The API container may start before MySQL finished its first boot, so
-      // the pool keeps retrying instead of crashing the process.
-      connectAttempts: int('DB_CONNECT_ATTEMPTS', 30),
-      connectRetryMs: int('DB_CONNECT_RETRY_MS', 2000),
-    },
-    sqlitePath,
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: int('DB_PORT', 3306),
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASS || '',
+    database: process.env.DB_NAME || 'ai_trading',
+    // The API container may start before MySQL finished its first boot, so the
+    // pool keeps retrying instead of crashing the process.
+    connectAttempts: int('DB_CONNECT_ATTEMPTS', 30),
+    connectRetryMs: int('DB_CONNECT_RETRY_MS', 2000),
   },
   uploads: {
     maxBytes: int('MAX_UPLOAD_MB', 25) * 1024 * 1024,

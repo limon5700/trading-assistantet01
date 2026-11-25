@@ -58,9 +58,8 @@ services:
     environment:
       NODE_ENV: production
       PORT: 4000
-      # MySQL is the primary store: all accounts, plans, codes, trade settings
-      # and knowledge items are written here.
-      DB_CLIENT: mysql
+      # MySQL is the only store: all accounts, plans, codes, trade settings and
+      # knowledge items are written here.
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: ${MYSQL_USER:-trading_app}
