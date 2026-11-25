@@ -43,3 +43,4 @@ mobile-app/android/.idea/
 
 # Local working copies of the split repositories
 repos/
+backend/.livetest/
