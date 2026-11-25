@@ -144,7 +144,7 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
       optionalString(body.user_custom_strategy, 4000) ||
       (mode === 'BINARY' ? savedSettings.binary_strategy : savedSettings.forex_strategy);
 
-    const { analysis, knowledgeEntriesUsed, model, modelsAttempted } = await analyzeChart({
+    const { analysis, strategySource, model, modelsAttempted } = await analyzeChart({
       imageBase64: image.data,
       mimeType: image.mimeType,
       currentTime: optionalString(body.currentTime ?? body.current_time, 64),
@@ -170,12 +170,12 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
         min_confidence: Math.round(minConfidence),
         model,
         models_attempted: modelsAttempted,
-        knowledge_entries: knowledgeEntriesUsed,
+        strategy_source: strategySource,
       },
     });
 
     res.set('Cache-Control', 'no-store');
-    res.set('X-Knowledge-Entries', String(knowledgeEntriesUsed));
+    res.set('X-Strategy-Source', strategySource);
     res.set('X-Gemini-Model', model);
     res.set('X-Gemini-Attempts', String(modelsAttempted.length));
     res.set('X-Signal-Mode', analysis.mode);

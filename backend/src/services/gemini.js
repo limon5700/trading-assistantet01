@@ -1,6 +1,5 @@
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { config } from '../config.js';
-import { buildKnowledgePrompt, getActiveKnowledge } from './knowledge.js';
 
 const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
 
@@ -101,10 +100,10 @@ const MODE_SCHEMAS = {
 const CHART_READING_RULES = `HOW TO ANALYSE (knowledge-driven, evidence-first, no guessing)
 0. EVIDENCE FIRST: describe to yourself what is actually drawn — the instrument, the timeframe, the direction of the last 5-8 candles, the colour and body/wick ratio of the latest CLOSED candle, the visible swing highs and lows, and the nearest support and resistance. Every claim in your reason must be visible in the screenshot. If the chart cannot be read, return WAIT.
 1. DECIDE FROM TWO KNOWLEDGE SOURCES, IN THIS ORDER:
-   a. THE ACTIVE KNOWLEDGE LIBRARY below — the BINARY or FOREX entries extracted from this trader's strategy books and manuals. It is the authority for this mode: its entry conditions, confirmation rules, expiry/timeframe rules and invalidation rules decide the trade. Never mix BINARY rules into FOREX or the reverse.
-   b. YOUR OWN EXPERT KNOWLEDGE of price action, candlestick behaviour, market structure, support and resistance, trendlines, supply and demand, Smart Money Concepts (HH/HL, BOS, CHoCH, order blocks, fair value gaps, liquidity sweeps) and the standard indicators (RSI, Bollinger Bands, EMA). Use it to read the chart and to fill the gaps the library does not cover — but never to contradict a library rule.
+   a. THE TRADER'S STRATEGY inside this instruction. It is the authority for this mode: its entry conditions, confirmation rules, expiry/timeframe rules and invalidation rules decide the trade. Never mix BINARY rules into FOREX or the reverse. When the trader's strategy is silent on a point, fall back to (b).
+   b. YOUR OWN EXPERT KNOWLEDGE of price action, candlestick behaviour, market structure, support and resistance, trendlines, supply and demand, Smart Money Concepts (HH/HL, BOS, CHoCH, order blocks, fair value gaps, liquidity sweeps) and the standard indicators (RSI, Bollinger Bands, EMA). Use it to read the chart and to fill the gaps the trader's strategy does not cover — but never to contradict it.
 2. DECIDE BY RULE SATISFACTION, NOT BY OPINION:
-   - Name the specific library rule (or, when the library is silent, the specific classical principle) the setup satisfies and quote it in the reason.
+   - Name the specific strategy rule (or, when the strategy is silent, the specific classical principle) the setup satisfies and quote it in the reason.
    - Check that rule's invalidation conditions on this chart. Any invalidation present means the rule is not satisfied.
    - If no rule's entry conditions are fully met, the answer is WAIT. Having a directional opinion is not the same as having a setup.
    - If two valid rules point in opposite directions, the conflict resolves to WAIT.
@@ -412,9 +411,15 @@ const modelCooldown = new Map();
 const retiredModels = new Set();
 /** A model that used up its free quota stays out of the chain for a while. */
 const COOLDOWN_QUOTA_MS = 15 * 60 * 1000;
-/** One immediate retry of the same model for a timeout, a 5xx or a bad answer. */
-const MAX_ATTEMPTS_PER_MODEL = 2;
-const TRANSIENT_RETRY_DELAY_MS = 1200;
+/**
+ * Gap before each extra attempt of the same model. Google's "503 high demand"
+ * spikes last seconds, so a single immediate retry lands inside the same spike;
+ * two spaced retries ride most of them out within the scan budget. The delay is
+ * jittered so simultaneous scans do not retry in lockstep and add to the load
+ * that caused the spike.
+ */
+const RETRY_DELAYS_MS = [2000, 5000];
+const MAX_ATTEMPTS_PER_MODEL = RETRY_DELAYS_MS.length + 1;
 
 function isCoolingDown(name) {
   if (retiredModels.has(name)) return true;
@@ -561,6 +566,22 @@ function describeGeminiError(error) {
     };
   }
   if (
+    haystack.includes('503') ||
+    haystack.includes('high demand') ||
+    haystack.includes('overloaded') ||
+    haystack.includes('service unavailable') ||
+    haystack.includes('temporarily unavailable')
+  ) {
+    return {
+      error: analysisError(
+        `Gemini's ${config.gemini.model} is at capacity right now (Google-side high demand). Try again in a few seconds.`,
+        503,
+        'GEMINI_OVERLOADED',
+      ),
+      kind: 'transient',
+    };
+  }
+  if (
     haystack.includes('429') ||
     haystack.includes('quota') ||
     haystack.includes('resource_exhausted') ||
@@ -617,8 +638,8 @@ export async function analyzeChart({
   preferredTimeframe,
 }) {
   const resolvedMode = normalizeMode(mode);
-  const activeEntries = await getActiveKnowledge(resolvedMode);
-  const knowledgeBlock = buildKnowledgePrompt(activeEntries);
+  // The trader's strategy travels with the request and lives in the system
+  // instruction below; the analysis never reads it from the database.
   const custom = compact(userCustomStrategy, 4000);
   const threshold = Math.max(0, Math.min(100, Math.round(Number(minConfidence) || 0)));
 
@@ -635,9 +656,8 @@ export async function analyzeChart({
     `MODE: ${resolvedMode}. ${preferred}`,
     `MINIMUM CONFIDENCE: ${threshold}%. If your confidence is lower than ${threshold}%, return WAIT.`,
     custom
-      ? `TRADER'S CUSTOM STRATEGY (apply in addition to the library, never contradict the risk rules):\n${custom}`
-      : 'TRADER CUSTOM STRATEGY: none supplied.',
-    `MODE-SPECIFIC KNOWLEDGE BASE (authoritative, ${activeEntries.length} active ${resolvedMode} entries, extracted from the trader's books and manuals). Judge the chart against these rules first, combine them with your own market expertise, and never mix BINARY rules into FOREX or the reverse:\n${knowledgeBlock}`,
+      ? `TRADER'S STRATEGY (authoritative for this ${resolvedMode} scan; apply it literally and never contradict the risk rules):\n${custom}`
+      : 'TRADER STRATEGY: none supplied for this scan, use the built-in price-action rules.',
   ].join('\n\n');
 
   const models = buildModelChain();
@@ -677,7 +697,7 @@ Trader timezone: ${timezone || 'unknown'}
 Minimum confidence: ${threshold}%
 ${resolvedMode === 'BINARY' ? `Preferred duration: ${preferredDuration || 60} seconds` : `Preferred timeframe: ${normalizeTimeframe(preferredTimeframe, '15M')}`}
 
-Read the chart first, then apply the active knowledge library together with your own market knowledge, name the rule that decided the trade, and only then return the JSON decision. If no rule is satisfied, return WAIT.`,
+Read the chart first, then apply the trader's strategy together with your own market knowledge, name the rule that decided the trade, and only then return the JSON decision. If no rule is satisfied, return WAIT.`,
             },
           ]),
           Math.min(remaining, config.gemini.attemptTimeoutMs),
@@ -692,7 +712,7 @@ Read the chart first, then apply the active knowledge library together with your
         modelCooldown.delete(modelName);
         return {
           analysis,
-          knowledgeEntriesUsed: activeEntries.length,
+          strategySource: custom ? 'request' : 'builtin',
           model: modelName,
           modelsAttempted: attempted,
         };
@@ -712,12 +732,14 @@ Read the chart first, then apply the active knowledge library together with your
         // quota will not improve by asking again: report it now.
         if (kind === 'fatal' || kind === 'quota') throw mapped;
         // A scan that already spent its whole attempt budget will most likely
-        // time out again on a second try, so only fast failures get the retry.
-        if (timedOut) throw mapped;
-        const retryBudget = deadline - Date.now();
-        if (attempt === MAX_ATTEMPTS_PER_MODEL || retryBudget < 6000) throw mapped;
-        console.warn(`[gemini] ${modelName} retrying once after: ${mapped.message}`);
-        await sleep(TRANSIENT_RETRY_DELAY_MS);
+        // time out again on the next try, so only fast failures get retried.
+        const retryDelay = RETRY_DELAYS_MS[attempt - 1];
+        if (timedOut || retryDelay === undefined || deadline - Date.now() < 6000) throw mapped;
+        const waitMs = retryDelay + Math.floor(Math.random() * 600);
+        console.warn(
+          `[gemini] ${modelName} busy, retry ${attempt + 1}/${MAX_ATTEMPTS_PER_MODEL} in ${(waitMs / 1000).toFixed(1)}s: ${mapped.message}`,
+        );
+        await sleep(waitMs);
       }
     }
   }

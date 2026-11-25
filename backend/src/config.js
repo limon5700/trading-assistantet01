@@ -55,7 +55,8 @@ export const config = {
     // Ceiling for one model call. A chart screenshot plus a full knowledge
     // library measures 10-30 s on gemini-flash-lite-latest, so a 20 s ceiling
     // rejected healthy scans as timeouts; 35 s leaves room for a slow one and
-    // still allows a single retry inside the 75 s scan budget.
+    // still allows two spaced retries of a "503 high demand" spike inside the
+    // 75 s scan budget.
     attemptTimeoutMs: int('GEMINI_ATTEMPT_TIMEOUT_MS', 35000),
     maxKnowledgeChars: int('MAX_KNOWLEDGE_CHARS', 120000),
   },
