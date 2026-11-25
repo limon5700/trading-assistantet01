@@ -165,7 +165,7 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
     if (permissions.running) {
       try {
         await TradingOverlay.setMode({ mode: nextMode });
-        setNotice(`${nextMode === 'BINARY' ? 'Binary' : 'Forex'} mode — background analysis is running. Tap the bubble to hear the signal.`);
+        setNotice(`${nextMode === 'BINARY' ? 'Binary' : 'Forex'} mode — tap Get signal for one live signal.`);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not switch mode.');
       }
@@ -202,7 +202,7 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
         return;
       }
 
-      setNotice('Approve screen capture in the Android dialog to start the background analysis.');
+      setNotice('Approve screen capture in the Android dialog to start the widget.');
       const result = await TradingOverlay.startOverlay({
         serverUrl: API_BASE_URL,
         token,
@@ -397,8 +397,8 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
 
       <p className="hub-caption">
         {permissions.running
-          ? 'Tap the compact bubble over your chart to hear the latest signal. Show more reveals the full card and JSON.'
-          : 'Choose Binary or Forex, approve screen capture, then tap the bubble for a signal.'}
+          ? 'Analysis runs in the background; tap once for one live signal. It never repeats on its own.'
+          : 'Choose Binary or Forex, approve screen capture, then tap for a signal.'}
       </p>
 
       <section className="card signal-card">
@@ -480,8 +480,8 @@ export function ControlHub({ onOpenSettings }: ControlHubProps) {
           </>
         ) : (
           <p className="placeholder">
-            No analysis yet. Once the widget is running it captures the chart every few seconds in the
-            background — tap the bubble for an instant signal.
+            No signal yet. The chart is analysed in the background; tap Get signal on the widget (or
+            the bubble) for one live signal.
           </p>
         )}
 

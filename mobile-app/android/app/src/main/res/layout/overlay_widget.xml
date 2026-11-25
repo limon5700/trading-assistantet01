@@ -31,12 +31,12 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="2dp"
-            android:background="@drawable/signal_wait"
+            android:background="@drawable/signal_scan"
             android:paddingStart="9dp"
             android:paddingTop="2dp"
             android:paddingEnd="9dp"
             android:paddingBottom="2dp"
-            android:text="WAIT"
+            android:text=""
             android:textColor="#FFFFFF"
             android:textSize="11sp"
             android:textStyle="bold" />
@@ -145,12 +145,12 @@
                 android:id="@+id/signal_badge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:background="@drawable/signal_wait"
+                android:background="@drawable/signal_scan"
                 android:paddingStart="12dp"
                 android:paddingTop="5dp"
                 android:paddingEnd="12dp"
                 android:paddingBottom="5dp"
-                android:text="WAIT"
+                android:text=""
                 android:textColor="#FFFFFF"
                 android:textSize="13sp"
                 android:textStyle="bold" />
@@ -167,7 +167,7 @@
                     android:id="@+id/confidence_text"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="—"
+                    android:text=""
                     android:textColor="#0F172A"
                     android:textSize="17sp"
                     android:textStyle="bold" />
@@ -175,7 +175,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="confidence"
+                    android:text=""
                     android:textColor="#94A3B8"
                     android:textSize="9sp" />
             </LinearLayout>
@@ -186,7 +186,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Asset: —"
+            android:text=""
             android:textColor="#0F172A"
             android:textSize="11sp"
             android:textStyle="bold" />
@@ -196,7 +196,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="2dp"
-            android:text="Candle: —"
+            android:text=""
             android:textColor="#334155"
             android:textSize="11sp"
             android:textStyle="bold" />
@@ -206,7 +206,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="2dp"
-            android:text="Duration: —"
+            android:text=""
             android:textColor="#334155"
             android:textSize="11sp" />
 
@@ -215,7 +215,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="2dp"
-            android:text="—"
+            android:text=""
             android:textColor="#0F172A"
             android:textSize="11sp"
             android:textStyle="bold" />
@@ -227,7 +227,7 @@
             android:layout_marginTop="6dp"
             android:ellipsize="end"
             android:maxLines="3"
-            android:text="Waiting for the first chart analysis…"
+                                android:text=""
             android:textColor="#475569"
             android:textSize="11sp" />
 
@@ -247,7 +247,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="7dp"
-            android:text="JSON"
+            android:text=""
             android:textColor="#94A3B8"
             android:textSize="8sp"
             android:textStyle="bold" />
@@ -264,7 +264,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:fontFamily="monospace"
-                android:text="{}"
+                android:text=""
                 android:textColor="#1E293B"
                 android:textSize="8.5sp" />
         </ScrollView>
@@ -274,7 +274,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="5dp"
-            android:text="Starting…"
+            android:text="Tap Get signal for one live signal."
             android:textColor="#94A3B8"
             android:textSize="9sp" />
 
@@ -314,4 +314,14 @@
                 android:textStyle="bold" />
         </LinearLayout>
     </LinearLayout>
+
+    <!-- Scanning effect: a neon line that sweeps down the widget while one scan runs. -->
+    <View
+        android:id="@+id/scan_line"
+        android:layout_width="match_parent"
+        android:layout_height="2dp"
+        android:layout_gravity="top|start"
+        android:background="@drawable/scan_line"
+        android:elevation="12dp"
+        android:visibility="gone" />
 </FrameLayout>

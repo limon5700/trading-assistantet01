@@ -8,7 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.animation.ValueAnimator
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -28,6 +30,7 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.LinearInterpolator
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -48,11 +51,11 @@ import kotlin.math.roundToInt
 /**
  * Foreground service that shows the draggable trading widget.
  *
- * While the widget is open it captures the screen every few seconds and quietly
- * caches the latest analysis in either BINARY or FOREX mode. It never pops up or
- * speaks during that loop: the trader taps the compact bubble to receive the
- * signal, which renders the card, speaks it through TextToSpeech and expands to
- * the full structured view with the raw JSON.
+ * While the widget is open a silent loop keeps reading the chart every few
+ * seconds and stores the newest answer, so a tap can deliver a signal at once.
+ * The loop alone never shows anything: only a tap on Get signal (or the bubble)
+ * renders that one answer and speaks it. Until then the card stays empty, so a
+ * placeholder can never be mistaken for a BUY, SELL or WAIT decision.
  */
 class FloatingWidgetService : Service() {
 
@@ -103,19 +106,29 @@ class FloatingWidgetService : Service() {
 
         const val UTTERANCE_ID = "SIGNAL_UTTERANCE"
 
+        /** Real model decisions. Anything else means no decision was received. */
+        private val DECISIONS = setOf("BUY", "SELL", "WAIT")
+        private val BUBBLE_ACCENT = 0xFF2563EB.toInt()
+        private val BUBBLE_MUTED = 0xFF64748B.toInt()
+        private const val SCAN_SWEEP_MS = 1100L
+        private const val SCAN_STATE_BUSY = "SCANNING"
+        private const val SCAN_STATE_FAILED = "ERROR"
+
         private const val CHANNEL_ID = "trading_overlay_channel"
         private const val NOTIFICATION_ID = 4310
 
-        /** Background loop: within the 5-8 second window the brief asks for. */
+        /**
+         * The chart is read in the background so a tap can answer instantly, but
+         * only a tap ever shows a signal; background results just fill the cache.
+         */
         private const val ANALYSIS_INTERVAL_MS = 6_000L
+        /** An answer this fresh is delivered on tap without another scan. */
+        private const val CACHE_FRESH_MS = 20_000L
         private const val CAPTURE_DELAY_MS = 300L
         private const val MAX_CAPTURE_WIDTH = 1280
         private const val JPEG_QUALITY = 80
         private const val MAX_FRAME_ATTEMPTS = 8
         private const val FRAME_RETRY_MS = 150L
-
-        /** Older than this and a tap triggers a fresh on-demand scan. */
-        private const val CACHE_FRESH_MS = 20_000L
 
         @Volatile
         var isRunning: Boolean = false
@@ -148,6 +161,8 @@ class FloatingWidgetService : Service() {
     private var analyzeButton: TextView? = null
     private var expandButton: TextView? = null
     private var showLessButton: TextView? = null
+    private var scanLine: View? = null
+    private var scanAnimator: ValueAnimator? = null
     private var expanded = false
 
     private var mediaProjection: MediaProjection? = null
@@ -158,13 +173,18 @@ class FloatingWidgetService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private val networkExecutor = Executors.newSingleThreadExecutor()
     private var analyzing = false
+    /** A tap asked for this scan: render it and speak when it lands. */
     @Volatile
     private var deliverWhenReady = false
+    /** A manual Rescan/analyze asked for this scan: render it, quietly. */
+    @Volatile
+    private var showWhenReady = false
     private var serverUrl: String = ""
     private var userToken: String = ""
 
     private var mode: String = MODE_BINARY
     private var voiceEnabled = true
+    /** Latest background answer, shown only when the trader taps for it. */
     private var cachedAnalysis: JSONObject? = null
     private var cachedAt = 0L
 
@@ -172,6 +192,7 @@ class FloatingWidgetService : Service() {
     private var ttsReady = false
     private var pendingSpeech: String? = null
 
+    /** Silent background analysis loop that keeps the cache warm. */
     private val analysisLoop = object : Runnable {
         override fun run() {
             if (!isRunning) return
@@ -206,10 +227,11 @@ class FloatingWidgetService : Service() {
             }
 
             ACTION_ANALYZE -> {
+                // A manual scan from the app: one chart read, one result.
                 if (isRunning) {
-                    handler.removeCallbacks(analysisLoop)
+                    showWhenReady = true
+                    clearSignalCard()
                     if (!analyzing) captureAndAnalyze()
-                    handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
                 }
             }
 
@@ -219,17 +241,13 @@ class FloatingWidgetService : Service() {
                 val next = normalizeMode(intent.getStringExtra(EXTRA_MODE))
                 if (next != mode) {
                     mode = next
-                    cachedAnalysis = null
-                    cachedAt = 0L
+                    forgetCachedSignal()
                     persistMode(mode)
                     applyModeBadge()
-                    updateStatus("${modeLabel()} mode · background analysis running")
+                    clearSignalCard()
+                    updateStatus("${modeLabel()} mode · tap Get signal for one live signal")
                     broadcastState(isRunning)
-                    if (isRunning) {
-                        handler.removeCallbacks(analysisLoop)
-                        if (!analyzing) captureAndAnalyze()
-                        handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
-                    }
+                    startBackgroundAnalysis(0L)
                 }
             }
 
@@ -243,14 +261,11 @@ class FloatingWidgetService : Service() {
             }
 
             ACTION_SET_TRADE_SETTINGS -> {
-                cachedAnalysis = null
-                cachedAt = 0L
+                // Settings are mirrored on every app open: never wipe a signal
+                // the trader is still reading, but re-read the chart with them.
+                forgetCachedSignal()
                 updateStatus("${modeLabel()} mode · trade settings updated")
-                if (isRunning) {
-                    handler.removeCallbacks(analysisLoop)
-                    if (!analyzing) captureAndAnalyze()
-                    handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
-                }
+                startBackgroundAnalysis(0L)
             }
 
             ACTION_UPDATE_SERVER -> {
@@ -318,9 +333,9 @@ class FloatingWidgetService : Service() {
             isRunning = true
             broadcastState(true)
             applyModeBadge()
-            updateStatus("${modeLabel()} mode · watching the chart silently")
-            // Start capturing right away so the first tap already has a cached signal.
-            handler.postDelayed(analysisLoop, 900L)
+            updateStatus("${modeLabel()} mode · tap the bubble for one live signal")
+            // Warm the cache immediately so the first tap is already instant.
+            startBackgroundAnalysis(900L)
         } catch (error: Exception) {
             Log.e(TAG, "Could not start screen capture", error)
             broadcastError("Could not start screen capture: ${error.message}")
@@ -389,6 +404,7 @@ class FloatingWidgetService : Service() {
         analyzeButton = view.findViewById(R.id.analyze_button)
         expandButton = view.findViewById(R.id.expand_button)
         showLessButton = view.findViewById(R.id.show_less_button)
+        scanLine = view.findViewById(R.id.scan_line)
         expanded = false
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -415,6 +431,8 @@ class FloatingWidgetService : Service() {
         attachDragHandler(bubbleView, params) { deliverSignal() }
         attachActions(view)
         applyModeBadge()
+        clearSignalCard()
+        updateStatus("Tap Get signal for one live signal.")
 
         try {
             windowManager.addView(view, params)
@@ -483,9 +501,10 @@ class FloatingWidgetService : Service() {
     private fun attachActions(view: View) {
         deliverButton?.setOnClickListener { deliverSignal() }
         analyzeButton?.setOnClickListener {
-            handler.removeCallbacks(analysisLoop)
+            // Rescan is manual too: one chart read, one result.
+            showWhenReady = true
+            clearSignalCard()
             if (!analyzing) captureAndAnalyze()
-            handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
         }
         expandButton?.setOnClickListener { setExpanded(true) }
         showLessButton?.setOnClickListener { setExpanded(false) }
@@ -535,10 +554,148 @@ class FloatingWidgetService : Service() {
                 badge.setBackgroundResource(R.drawable.signal_sell)
             }
 
-            else -> {
+            "WAIT" -> {
                 badge.text = "WAIT"
                 badge.setBackgroundResource(R.drawable.signal_wait)
             }
+
+            SCAN_STATE_BUSY -> {
+                badge.text = "…"
+                badge.setBackgroundResource(R.drawable.signal_scan)
+            }
+
+            SCAN_STATE_FAILED -> {
+                badge.text = "!"
+                badge.setBackgroundResource(R.drawable.signal_scan)
+            }
+
+            else -> {
+                // No decision has been received yet: show nothing at all.
+                badge.text = ""
+                badge.setBackgroundResource(R.drawable.signal_scan)
+            }
+        }
+    }
+
+    /**
+     * Clears every value so the card shows no BUY, SELL or WAIT until a real
+     * answer has arrived from the server.
+     */
+    private fun clearSignalCard() {
+        handler.post {
+            applySignalBadge(bubbleSignal, "")
+            applySignalBadge(signalBadge, "")
+            confidenceText?.text = ""
+            assetText?.text = ""
+            candleText?.text = ""
+            timingText?.text = ""
+            levelsText?.text = ""
+            reasonText?.text = ""
+            voiceText?.text = ""
+            jsonText?.text = ""
+            bubbleHint?.text = "TAP\nFOR SIGNAL"
+            applySignalTheme("")
+        }
+    }
+
+    /**
+     * Tints the floating widget by the decision: green for BUY, red for SELL,
+     * neutral white otherwise, so the state is readable without opening the card.
+     */
+    private fun applySignalTheme(signal: String) {
+        handler.post {
+            when (signal) {
+                "BUY" -> {
+                    bubbleView?.setBackgroundResource(R.drawable.overlay_bubble_buy)
+                    expandedView?.setBackgroundResource(R.drawable.overlay_card_buy)
+                    toneBubbleText(Color.WHITE)
+                }
+
+                "SELL" -> {
+                    bubbleView?.setBackgroundResource(R.drawable.overlay_bubble_sell)
+                    expandedView?.setBackgroundResource(R.drawable.overlay_card_sell)
+                    toneBubbleText(Color.WHITE)
+                }
+
+                else -> {
+                    bubbleView?.setBackgroundResource(R.drawable.overlay_bubble)
+                    expandedView?.setBackgroundResource(R.drawable.overlay_card)
+                    toneBubbleText(BUBBLE_ACCENT)
+                }
+            }
+        }
+    }
+
+    private fun toneBubbleText(accent: Int) {
+        val muted = if (accent == Color.WHITE) Color.WHITE else BUBBLE_MUTED
+        bubbleMode?.setTextColor(accent)
+        bubbleHint?.setTextColor(accent)
+        expandButton?.setTextColor(muted)
+    }
+
+    /** Cyber-style sweep: a neon line runs down the widget while one scan runs. */
+    private fun startScanEffect() {
+        handler.post {
+            val line = scanLine ?: return@post
+            val root = overlayView ?: return@post
+            line.visibility = View.VISIBLE
+            line.alpha = 1f
+            line.translationY = 0f
+            root.post {
+                val travel = (root.height - line.height).coerceAtLeast(1).toFloat()
+                scanAnimator?.cancel()
+                scanAnimator = ValueAnimator.ofFloat(0f, travel).apply {
+                    duration = SCAN_SWEEP_MS
+                    repeatCount = ValueAnimator.INFINITE
+                    repeatMode = ValueAnimator.RESTART
+                    interpolator = LinearInterpolator()
+                    addUpdateListener { line.translationY = it.animatedValue as Float }
+                    start()
+                }
+            }
+        }
+    }
+
+    private fun stopScanEffect() {
+        handler.post {
+            scanAnimator?.cancel()
+            scanAnimator = null
+            scanLine?.let { line ->
+                line.visibility = View.GONE
+                line.translationY = 0f
+            }
+        }
+    }
+
+    /** Marks that one scan is in flight, without inventing any signal value. */
+    private fun showScanningState() {
+        handler.post {
+            applySignalBadge(bubbleSignal, SCAN_STATE_BUSY)
+            applySignalBadge(signalBadge, SCAN_STATE_BUSY)
+            confidenceText?.text = ""
+            reasonText?.text = ""
+            voiceText?.text = ""
+            statusText?.text = "Scanning…"
+            applySignalTheme(SCAN_STATE_BUSY)
+            startScanEffect()
+        }
+    }
+
+    /**
+     * A scan that could not be completed must not look like the model's WAIT
+     * decision, so it replaces the badge and states the reason on the card.
+     */
+    private fun showScanFailure(message: String) {
+        handler.post {
+            stopScanEffect()
+            applySignalTheme("")
+            applySignalBadge(bubbleSignal, SCAN_STATE_FAILED)
+            applySignalBadge(signalBadge, SCAN_STATE_FAILED)
+            confidenceText?.text = ""
+            reasonText?.text = message
+            voiceText?.text = ""
+            statusText?.text = message
+            bubbleHint?.text = "TAP\nTO RETRY"
         }
     }
 
@@ -559,18 +716,21 @@ class FloatingWidgetService : Service() {
     /** Renders the full structured card. Speaks only when `speak` is true. */
     private fun renderAnalysis(analysis: JSONObject, speak: Boolean) {
         handler.post {
-            val signal = analysis.optString("signal", "WAIT").uppercase(Locale.US)
+            val signal = analysis.optString("signal").uppercase(Locale.US)
+            val hasDecision = signal in DECISIONS
             val resolvedMode = if (analysis.optString("mode", mode).uppercase(Locale.US) == MODE_FOREX) {
                 MODE_FOREX
             } else {
                 MODE_BINARY
             }
 
+            stopScanEffect()
+            applySignalTheme(signal)
             applySignalBadge(bubbleSignal, signal)
             applySignalBadge(signalBadge, signal)
             bubbleHint?.text = "TAP\nFOR SIGNAL"
 
-            confidenceText?.text = "${analysis.optInt("confidence", 0)}%"
+            confidenceText?.text = if (hasDecision) "${analysis.optInt("confidence", 0)}%" else ""
             assetText?.text = "${if (resolvedMode == MODE_FOREX) "Forex" else "Binary"} · ${analysis.optString("asset", "—")}"
             candleText?.text = "Candle: " + when (analysis.optString("candle_entry")) {
                 "RUNNING_CANDLE" -> "Running Candle"
@@ -605,15 +765,35 @@ class FloatingWidgetService : Service() {
         }
     }
 
-    /** Quietly caches the result without any popup or speech. */
-    private fun cacheAnalysis(analysis: JSONObject) {
+    /** Keeps the newest answer for the next tap; the card stays untouched. */
+    private fun rememberAnalysis(analysis: JSONObject) {
         cachedAnalysis = analysis
         cachedAt = System.currentTimeMillis()
-        handler.post {
-            // The bubble only shows the mode while collapsed; the result appears on tap.
-            bubbleHint?.text = "TAP\nFOR SIGNAL"
+    }
+
+    private fun forgetCachedSignal() {
+        cachedAnalysis = null
+        cachedAt = 0L
+    }
+
+    /** Starts (or restarts) the silent loop that keeps the cache warm. */
+    private fun startBackgroundAnalysis(delayMs: Long = ANALYSIS_INTERVAL_MS) {
+        handler.removeCallbacks(analysisLoop)
+        if (!isRunning) return
+        handler.postDelayed(analysisLoop, delayMs)
+    }
+
+    /**
+     * A failed background read stays silent; a failure of the tap the trader
+     * made is reported on the card so it can never pass for a WAIT decision.
+     */
+    private fun reportFailure(message: String) {
+        if (deliverWhenReady || showWhenReady) {
+            broadcastError(message)
+            showScanFailure(message)
+        } else {
+            Log.w(TAG, "Background scan skipped: $message")
         }
-        broadcastAnalysis(analysis)
     }
 
     // ----------------------------------------------------------------- voice
@@ -686,34 +866,39 @@ class FloatingWidgetService : Service() {
     // ------------------------------------------------------------- analysis
 
     /**
-     * One-tap delivery: speaks and shows the cached analysis when it is fresh,
-     * otherwise runs an immediate on-demand scan and delivers that result.
+     * One tap, one signal. The background loop has already read the chart, so
+     * the tap normally delivers that answer at once; only a stale cache makes it
+     * capture a fresh screenshot first. Nothing shows a signal on its own.
      */
     private fun deliverSignal() {
+        if (!isRunning) return
+
         val cached = cachedAnalysis
         if (cached != null && System.currentTimeMillis() - cachedAt < CACHE_FRESH_MS) {
-            renderAnalysis(cached, true)
+            renderAnalysis(cached, speak = true)
+            broadcastAnalysis(cached)
             updateStatus("Signal delivered · ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}")
             return
         }
 
         deliverWhenReady = true
-        handler.removeCallbacks(analysisLoop)
-        updateStatus("Scanning for an instant signal…")
+        clearSignalCard()
+        updateStatus("Scanning…")
+        // A background scan may be in flight: its answer is this tap's signal.
         if (!analyzing) captureAndAnalyze()
-        handler.postDelayed(analysisLoop, ANALYSIS_INTERVAL_MS)
     }
 
     private fun captureAndAnalyze() {
         if (analyzing || !isRunning) return
-        if (deliverWhenReady) updateStatus("Scanning for an instant signal…") else updateStatus("Reading the chart…")
         analyzing = true
         setActionsEnabled(false)
+        // Only a tap puts the card into a scanning state; the background loop
+        // must never wipe the signal the trader is reading.
+        if (deliverWhenReady || showWhenReady) showScanningState()
 
         if (imageReader == null) {
-            analyzing = false
-            setActionsEnabled(true)
-            updateStatus("Screen capture is not ready")
+            reportFailure("Screen capture is not ready. Stop and start the widget again.")
+            finishAnalysis()
             return
         }
 
@@ -727,16 +912,14 @@ class FloatingWidgetService : Service() {
      */
     private fun captureFrame(attempt: Int) {
         if (!isRunning) {
-            analyzing = false
-            setActionsEnabled(true)
+            finishAnalysis()
             return
         }
 
         val reader = imageReader
         if (reader == null) {
-            analyzing = false
-            setActionsEnabled(true)
-            updateStatus("Screen capture is not ready")
+            reportFailure("Screen capture is not ready. Stop and start the widget again.")
+            finishAnalysis()
             return
         }
 
@@ -758,9 +941,8 @@ class FloatingWidgetService : Service() {
             if (attempt < MAX_FRAME_ATTEMPTS) {
                 handler.postDelayed({ captureFrame(attempt + 1) }, FRAME_RETRY_MS)
             } else {
-                analyzing = false
-                setActionsEnabled(true)
-                updateStatus("Waiting for the screen…")
+                reportFailure("No frame came from the screen. Keep the chart visible and tap again.")
+                finishAnalysis()
             }
             return
         }
@@ -777,6 +959,12 @@ class FloatingWidgetService : Service() {
         val rowStride = plane.rowStride
         val rowPadding = rowStride - pixelStride * image.width
         val paddedWidth = image.width + rowPadding / pixelStride
+
+        // copyPixelsFromBuffer copies from the buffer's current position, and a
+        // frame that was already touched sits at its end. Without the rewind the
+        // copy throws on those frames, the capture never yields a bitmap and the
+        // widget keeps the placeholder card instead of a signal.
+        buffer.rewind()
 
         val padded = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
         padded.copyPixelsFromBuffer(buffer)
@@ -808,15 +996,13 @@ class FloatingWidgetService : Service() {
 
     private fun sendForAnalysis(imageBase64: String) {
         if (serverUrl.isBlank()) {
+            reportFailure("This build has no backend URL. Reinstall the official app.")
             finishAnalysis()
-            broadcastError("This build has no backend URL. Reinstall the official app.")
-            updateStatus("Backend URL missing")
             return
         }
         if (userToken.isBlank()) {
+            reportFailure("Your session expired. Open the app and sign in again.")
             finishAnalysis()
-            broadcastError("Your session expired. Open the app and sign in again.")
-            updateStatus("Sign-in required")
             return
         }
 
@@ -882,21 +1068,33 @@ class FloatingWidgetService : Service() {
                         JSONObject(responseText).optString("error")
                     }.getOrNull().takeUnless { it.isNullOrBlank() }
                         ?: "Server returned HTTP $status"
-                    broadcastError(message)
-                    updateStatus(if (status == 401) "Sign-in required" else "Analysis failed")
+                    reportFailure(message)
                     finishAnalysis(delivered = false)
                     return@execute
                 }
 
                 val analysis = JSONObject(responseText)
-                val shouldSpeak = deliverWhenReady
-                cacheAnalysis(analysis)
-                renderAnalysis(analysis, speak = shouldSpeak)
-                finishAnalysis(delivered = true)
+                val decision = analysis.optString("signal").uppercase(Locale.US)
+                if (decision !in DECISIONS) {
+                    // A 200 without a decision is a failed scan, not a WAIT.
+                    reportFailure("The server returned no signal. Tap to retry.")
+                    finishAnalysis(delivered = false)
+                    return@execute
+                }
+
+                // Every answer warms the cache, but only the scan the trader
+                // asked for reaches the card and the voice.
+                val speakNow = deliverWhenReady
+                val showNow = speakNow || showWhenReady
+                rememberAnalysis(analysis)
+                if (showNow) {
+                    renderAnalysis(analysis, speak = speakNow)
+                    broadcastAnalysis(analysis)
+                }
+                finishAnalysis(delivered = showNow)
             } catch (error: Exception) {
                 Log.e(TAG, "Analysis request failed", error)
-                broadcastError("Network error: ${error.message ?: "request failed"}")
-                updateStatus("Network error")
+                reportFailure("Network error: ${error.message ?: "request failed"}")
                 finishAnalysis(delivered = false)
             } finally {
                 connection?.disconnect()
@@ -907,6 +1105,8 @@ class FloatingWidgetService : Service() {
     private fun finishAnalysis(delivered: Boolean = false) {
         analyzing = false
         deliverWhenReady = false
+        showWhenReady = false
+        stopScanEffect()
         setActionsEnabled(true)
         if (!delivered) handler.post { bubbleHint?.text = "TAP\nFOR SIGNAL" }
     }
@@ -923,7 +1123,7 @@ class FloatingWidgetService : Service() {
             "Trading overlay",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Keeps the floating trading widget and background screen analysis running"
+            description = "Keeps the floating trading widget running; tap Signal for one live signal"
             setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
@@ -953,7 +1153,7 @@ class FloatingWidgetService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("AI Trading Assistant")
-            .setContentText("${modeLabel()} background analysis is running")
+            .setContentText("Auto analysis on · tap Signal for one live signal")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -1037,6 +1237,8 @@ class FloatingWidgetService : Service() {
         analyzeButton = null
         expandButton = null
         showLessButton = null
+        stopScanEffect()
+        scanLine = null
         expanded = false
     }
 
