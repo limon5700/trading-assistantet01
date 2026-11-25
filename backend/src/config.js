@@ -57,7 +57,7 @@ export const config = {
   },
   gemini: {
     apiKey: required('GEMINI_API_KEY'),
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    model: process.env.GEMINI_MODEL || 'gemini-flash-lite-latest',
     timeoutMs: int('GEMINI_TIMEOUT_MS', 60000),
     // Total analysis models tried before the request gives up (failover chain).
     maxModelAttempts: int('GEMINI_MAX_MODEL_ATTEMPTS', 8),
