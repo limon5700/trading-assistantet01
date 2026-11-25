@@ -12,7 +12,7 @@ export const API_BASE_URL = (
   .trim()
   .replace(/\/+$/, '');
 
-export const APP_VERSION = (import.meta.env.VITE_APP_VERSION as string | undefined) || '1.0.2';
+export const APP_VERSION = (import.meta.env.VITE_APP_VERSION as string | undefined) || '1.9.0';
 
 /** Absolute URL for a server-provided media path (`/uploads/...`). */
 export function mediaUrl(value: string | null | undefined): string {
