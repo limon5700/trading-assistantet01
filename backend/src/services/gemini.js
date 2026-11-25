@@ -406,32 +406,6 @@ function analysisError(message, status, code) {
   return Object.assign(new Error(message), { status, code });
 }
 
-/**
- * Live free-tier Flash models that answer our structured JSON signal, cheapest
- * and fastest first. The retired 1.5/2.0/2.5 names are deliberately gone: a
- * current key answers 404 for them, and every 404 is a wasted request plus a
- * log line the trader should never have to read.
- */
-const PREFERRED_MODELS = [
-  'gemini-flash-lite-latest',
-  'gemini-flash-latest',
-  'gemini-3.8-flash',
-  'gemini-3.7-flash',
-  'gemini-3.6-flash',
-  'gemini-3.5-flash',
-];
-
-/** Only Flash-tier models are auto-discovered: those are the ones with free quota. */
-const FLASH_MODEL = /flash/i;
-
-const MODEL_LIST_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
-const MODEL_CACHE_MS = 10 * 60 * 1000;
-const MODEL_LIST_TIMEOUT_MS = 8000;
-/** Image generation, speech, embedding and agent-only models cannot return our JSON signal. */
-const NON_ANALYSIS_MODEL =
-  /(?:^|[-_])(?:image|tts|transcribe|lyria|embedding|nano-banana|robotics|computer-use|deep-research|antigravity|omni)(?:[-_]|$)/i;
-
-let modelCache = { at: 0, models: [] };
 /** Models that recently failed, so the next scan does not pay for them again. */
 const modelCooldown = new Map();
 /** Models this key rejected outright (404): retired for new keys, never retried. */
@@ -439,7 +413,6 @@ const retiredModels = new Set();
 const COOLDOWN_TRANSIENT_MS = 60 * 1000;
 /** A model that used up its free quota stays out of the chain for a while. */
 const COOLDOWN_QUOTA_MS = 15 * 60 * 1000;
-let lastGoodModel = null;
 
 function isCoolingDown(name) {
   if (retiredModels.has(name)) return true;
@@ -481,99 +454,26 @@ function quarantineModel(name, error, haystack, code) {
   console.warn(`[gemini] ${name} failed, resting ${COOLDOWN_TRANSIENT_MS / 1000} seconds`);
 }
 
-function isAnalysisModel(name) {
-  return typeof name === 'string' && /^gemini-/i.test(name) && !NON_ANALYSIS_MODEL.test(name);
-}
-
-/** Newer, stable, lower-cost models first; Pro models last because they are slower. */
-function modelScore(name) {
-  const n = name.toLowerCase();
-  const version = /gemini-(\d+)(?:\.(\d+))?/.exec(n);
-  const versionScore = version ? Number(version[1]) * 10 + Number(version[2] || 0) : 0;
-  const experimental = /preview|exp\b|experimental|customtools|thinking/.test(n) ? 0 : 1;
-  const tier = /pro/.test(n) ? 3 : /lite/.test(n) ? 1 : /flash/.test(n) ? 0 : 2;
-  return { experimental, versionScore, tier };
-}
-
-function compareModels(a, b) {
-  const sa = modelScore(a);
-  const sb = modelScore(b);
-  if (sa.experimental !== sb.experimental) return sb.experimental - sa.experimental;
-  if (sa.versionScore !== sb.versionScore) return sb.versionScore - sa.versionScore;
-  if (sa.tier !== sb.tier) return sa.tier - sb.tier;
-  return a.localeCompare(b);
-}
-
 /**
- * Asks the Gemini API which models this key can actually call and caches the
- * answer. A network or key problem here is not fatal: the caller falls back to
- * the preferred list and the analysis request reports the real error.
+ * The single model every scan calls. This is deliberately not configurable: the
+ * assistant uses gemini-flash-lite-latest and nothing else, so a dead or drained
+ * model can never turn one scan into a catalogue walk that ends in a timeout.
+ * A model that just failed rests, and the caller is told for how long.
  */
-async function discoverModels() {
-  if (modelCache.models.length && Date.now() - modelCache.at < MODEL_CACHE_MS) {
-    return modelCache.models;
-  }
+function buildModelChain() {
+  const model = config.gemini.model;
+  if (!retiredModels.has(model) && !isCoolingDown(model)) return [model];
 
-  try {
-    const response = await fetch(`${MODEL_LIST_URL}?pageSize=1000`, {
-      headers: { 'x-goog-api-key': config.gemini.apiKey },
-      signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
-    });
-    if (!response.ok) throw new Error(`model list returned HTTP ${response.status}`);
-    const payload = await response.json();
-    const models = (payload?.models ?? [])
-      .filter((model) => (model?.supportedGenerationMethods ?? []).includes('generateContent'))
-      .map((model) => String(model.name || '').replace(/^models\//, ''))
-      .filter(isAnalysisModel)
-      // The cache is a catalogue: a quota-resting model must come back on its
-      // own, so only permanently retired names are dropped here. The chain
-      // applies the live cooldown state.
-      .filter((name) => !retiredModels.has(name));
-
-    if (!models.length) throw new Error('model list was empty');
-    // Flash models carry the free quota, so they lead the list; a Pro model is
-    // only kept when this key has no usable Flash model at all.
-    const flash = models.filter((name) => FLASH_MODEL.test(name));
-    const usable = (flash.length ? flash : models).sort(compareModels);
-    modelCache = { at: Date.now(), models: usable };
-    console.log(
-      `[gemini] ${usable.length} usable ${flash.length ? 'flash ' : ''}models (fastest first: ${usable
-        .slice(0, 4)
-        .join(', ')})`,
+  const waitMs = cooldownLeft(model);
+  if (!Number.isFinite(waitMs)) {
+    throw analysisError(
+      `Gemini rejected "${model}" for this API key (retired or unknown), and it is the only model this assistant uses. Check the key and its project access.`,
+      503,
+      'GEMINI_MODEL_UNAVAILABLE',
     );
-    return modelCache.models;
-  } catch (error) {
-    console.warn(`[gemini] could not list models: ${error?.message || error}`);
-    return modelCache.models;
   }
-}
-
-/**
- * Builds the failover chain: the configured model first, then every preferred
- * model, then the rest of the models discovered for this key. This is what
- * makes a configured Lite, Flash or Pro model work even when another model is
- * retired, overloaded or out of quota.
- */
-async function buildModelChain() {
-  const discovered = await discoverModels();
-  // The model that answered last time leads, so a healthy chain starts with an
-  // attempt that is known to work instead of the configured default.
-  const ordered = [lastGoodModel, config.gemini.model, ...PREFERRED_MODELS, ...discovered]
-    .map((name) => String(name || '').trim())
-    .filter(Boolean);
-
-  const unique = [...new Set(ordered)].filter((name) => !retiredModels.has(name));
-  const healthy = unique.filter((name) => !isCoolingDown(name));
-  if (healthy.length) return healthy.slice(0, config.gemini.maxModelAttempts);
-
-  // Nothing is ready. Failing with the wait time is better than firing calls
-  // that can only answer 404 or QUOTA_EXCEEDED.
-  const waitMs = Math.min(...unique.map(cooldownLeft));
-  const seconds = Number.isFinite(waitMs) ? Math.max(1, Math.ceil(waitMs / 1000)) : null;
   throw analysisError(
-    seconds
-      ? `No Gemini model is available right now (retired or out of quota). Try again in ${seconds} seconds.`
-      : 'No usable Gemini model is configured. Check GEMINI_MODEL and the API key.',
+    `Gemini model "${model}" is resting after a failure. Try again in ${Math.max(1, Math.ceil(waitMs / 1000))} seconds.`,
     503,
     'GEMINI_MODELS_COOLING_DOWN',
   );
@@ -581,8 +481,9 @@ async function buildModelChain() {
 
 /**
  * Turns an SDK error into an actionable API error. Only a key or project
- * permission failure stops the chain; every other failure (retired model,
- * overload, quota, timeout, malformed JSON) moves on to the next model.
+ * permission failure is final; a retired model, an overloaded or drained one, a
+ * timeout or malformed JSON is reported as-is, because there is no second model
+ * to fall back to.
  */
 function describeGeminiError(error) {
   if (error?.status && error?.code) return { error, retryModel: error.code !== 'GEMINI_KEY_INVALID' };
@@ -695,7 +596,7 @@ export async function analyzeChart({
     `MODE-SPECIFIC KNOWLEDGE BASE (authoritative, ${activeEntries.length} active ${resolvedMode} entries, extracted from the trader's books and manuals). Judge the chart against these rules first, combine them with your own market expertise, and never mix BINARY rules into FOREX or the reverse:\n${knowledgeBlock}`,
   ].join('\n\n');
 
-  const models = await buildModelChain();
+  const models = buildModelChain();
   const deadline = Date.now() + config.gemini.timeoutMs;
   const attempted = [];
   let lastError = null;
@@ -743,7 +644,6 @@ Read the chart first, then apply the active knowledge library together with your
         minConfidence: threshold,
         preferredDuration,
       });
-      lastGoodModel = modelName;
       modelCooldown.delete(modelName);
       return {
         analysis,
@@ -771,7 +671,7 @@ Read the chart first, then apply the active knowledge library together with your
   if (lastError?.status) throw lastError;
 
   throw analysisError(
-    `No Gemini model answered (tried ${attempted.length}). ${lastError?.message || 'Check GEMINI_MODEL and the API key.'}`,
+    `Gemini did not answer ${attempted.length === 1 ? '' : `(${attempted.length} attempts) `}from ${config.gemini.model}. ${lastError?.message || 'Check the API key.'}`,
     502,
     'GEMINI_MODEL_UNAVAILABLE',
   );

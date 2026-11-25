@@ -48,11 +48,12 @@ export const config = {
   },
   gemini: {
     apiKey: required('GEMINI_API_KEY'),
-    model: process.env.GEMINI_MODEL || 'gemini-flash-lite-latest',
+    // Hard-locked on purpose: one Flash model only, never read from the
+    // environment, so no deployment can quietly point a scan at another model.
+    model: 'gemini-flash-lite-latest',
     timeoutMs: int('GEMINI_TIMEOUT_MS', 60000),
-    // Total analysis models tried before the request gives up (failover chain).
-    maxModelAttempts: int('GEMINI_MAX_MODEL_ATTEMPTS', 4),
-    // Per-model ceiling; a stalled model must not eat the whole scan budget.
+    // Ceiling for the single model call; a stalled model must not eat the whole
+    // scan budget, so the request fails with a timeout instead of queueing more.
     attemptTimeoutMs: int('GEMINI_ATTEMPT_TIMEOUT_MS', 20000),
     maxKnowledgeChars: int('MAX_KNOWLEDGE_CHARS', 120000),
   },

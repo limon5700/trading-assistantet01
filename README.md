@@ -19,7 +19,7 @@ Admin dashboard ──CRUD──▶ Backend (knowledge_base table)
 Android overlay ──screenshot + time + timezone──┘
                               │
                               ▼
-                   Gemini 2.5 Flash (strict JSON)
+      Gemini Flash - gemini-flash-lite-latest (strict JSON)
                               │
    {signal, confidence, entry_time, asset, timeframe, reason, voice_summary}
                               │

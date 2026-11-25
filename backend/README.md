@@ -5,8 +5,10 @@ dashboard and the Android floating overlay.
 
 - Admin JWT auth (HTTP-only cookie **and** `Authorization: Bearer`).
 - Global trading knowledge base: plain-text rules and multi-page PDFs.
-- `POST /api/analyze-chart`: Gemini 2.5 Flash vision analysis with strict JSON
-  schema output, injected with every active knowledge entry.
+- `POST /api/analyze-chart`: Gemini Flash (`gemini-flash-lite-latest`) vision
+  analysis with strict JSON schema output, injected with every active knowledge
+  entry. Each scan calls that one model only, so a slow or retired model cannot
+  run the request into a timeout.
 
 The Gemini key lives only in this service. It is never returned by an endpoint
 and never bundled into the dashboard or the Android app.
