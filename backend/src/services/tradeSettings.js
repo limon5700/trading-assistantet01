@@ -4,10 +4,10 @@ export const BINARY_DURATIONS = [5, 15, 30, 60, 180, 300];
 export const FOREX_TIMEFRAMES = ['1M', '5M', '15M', '1H', '4H'];
 
 export const DEFAULT_TRADE_SETTINGS = {
-  binary_min_confidence: 70,
+  binary_min_confidence: 60,
   binary_duration_seconds: 60,
   binary_strategy: '',
-  forex_min_confidence: 70,
+  forex_min_confidence: 60,
   forex_timeframe: '15M',
   forex_strategy: '',
 };

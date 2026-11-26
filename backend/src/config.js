@@ -51,7 +51,10 @@ export const config = {
     // Hard-locked on purpose: one Flash model only, never read from the
     // environment, so no deployment can quietly point a scan at another model.
     model: 'gemini-flash-lite-latest',
-    timeoutMs: int('GEMINI_TIMEOUT_MS', 75000),
+    // The Android overlay waits 110 s for this response, so the scan budget
+    // must stay well inside it. At 75 s the client gave up in the same moment
+    // the answer arrived and correct scans looked like timeouts.
+    timeoutMs: int('GEMINI_TIMEOUT_MS', 70000),
     // Ceiling for one model call. A chart screenshot plus a full knowledge
     // library measures 10-30 s on gemini-flash-lite-latest, so a 20 s ceiling
     // rejected healthy scans as timeouts; 35 s leaves room for a slow one and

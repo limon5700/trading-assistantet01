@@ -105,11 +105,11 @@ const CHART_READING_RULES = `HOW TO ANALYSE (knowledge-driven, evidence-first, n
 2. DECIDE BY RULE SATISFACTION, NOT BY OPINION:
    - Name the specific strategy rule (or, when the strategy is silent, the specific classical principle) the setup satisfies and quote it in the reason.
    - Check that rule's invalidation conditions on this chart. Any invalidation present means the rule is not satisfied.
-   - If no rule's entry conditions are fully met, the answer is WAIT. Having a directional opinion is not the same as having a setup.
+   - A rule counts as met when its direction and its level are both visible on the chart; a missing secondary confirmation lowers confidence (52-79) but does not cancel a readable setup. Only return WAIT when no rule's direction and level are both visible.
    - If two valid rules point in opposite directions, the conflict resolves to WAIT.
 3. READ THE SETUP IN CONTEXT: market structure, candle sequence and momentum, candle anatomy (long lower wick = buyers defending, long upper wick = sellers defending, small bodies = indecision), the level price is reacting to, and where price sits inside the visible range. Direction comes from that evidence — never from a default.
 4. CANDLE ENTRY: RUNNING_CANDLE when the current candle is already moving in the signal direction and the expiry fits inside its remaining time; NEXT_CANDLE when the setup needs the next candle's open or close to confirm.
-5. CONFIDENCE must be honest and reflect confluence: 85-95 = a library rule fully satisfied with trend, level and trigger aligned; 70-84 = a valid rule with one confirmation missing; 50-69 = weak or partly conflicting; below 50 = no trade. Never inflate confidence to clear the trader's threshold.
+5. CONFIDENCE must be honest and reflect confluence, using the whole scale: 80-95 = a library rule fully satisfied with trend, level and trigger aligned; 65-79 = a valid rule with one confirmation missing; 52-64 = one clear rule with the level respected but thin confluence, still tradeable on a short expiry; below 52 = no trade. Never inflate confidence to clear the trader's threshold, and never report a directional setup below 52.
 6. FOREX PRICES: entry, stop-loss and take-profit must be actual levels read from the chart's price axis. The stop goes beyond the structure that invalidates the idea, the target goes toward the next level, and risk:reward must be at least 1:1.5 — otherwise WAIT.
 7. NO WRONG SIGNAL: never invent a level, indicator or rule that is not visible or not in the library. When the evidence is incomplete or the setup is unconfirmed, return WAIT with a low confidence. A missed trade costs nothing; a wrong BUY or SELL costs money.`;
 

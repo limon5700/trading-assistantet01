@@ -108,8 +108,10 @@ class FloatingWidgetService : Service() {
 
         /** Real model decisions. Anything else means no decision was received. */
         private val DECISIONS = setOf("BUY", "SELL", "WAIT")
-        private val BUBBLE_ACCENT = 0xFF2563EB.toInt()
-        private val BUBBLE_MUTED = 0xFF64748B.toInt()
+        // Colour.rgb keeps these inside the Int range; a plain 0xFF... literal
+        // above Int.MAX does not compile.
+        private val BUBBLE_ACCENT = Color.rgb(0x25, 0x63, 0xEB)
+        private val BUBBLE_MUTED = Color.rgb(0x64, 0x74, 0x8B)
         private const val SCAN_SWEEP_MS = 1100L
         private const val SCAN_STATE_BUSY = "SCANNING"
         private const val SCAN_STATE_FAILED = "ERROR"
@@ -162,6 +164,7 @@ class FloatingWidgetService : Service() {
     private var expandButton: TextView? = null
     private var showLessButton: TextView? = null
     private var scanLine: View? = null
+    private var hideOverlayForCapture = false
     private var scanAnimator: ValueAnimator? = null
     private var expanded = false
 
@@ -902,7 +905,16 @@ class FloatingWidgetService : Service() {
             return
         }
 
-        handler.postDelayed({ captureFrame(0) }, CAPTURE_DELAY_MS)
+        // The widget itself is part of the screen, and an expanded card covers most
+        // of the candles, so a tapped scan hides it for the frame; otherwise the
+        // model reads a white panel instead of the chart and answers WAIT. A
+        // background scan keeps the collapsed bubble visible so nothing blinks.
+        val hideForFrame = deliverWhenReady || showWhenReady
+        handler.post {
+            hideOverlayForCapture = hideForFrame
+            if (hideForFrame) overlayView?.visibility = View.INVISIBLE
+            handler.postDelayed({ captureFrame(0) }, CAPTURE_DELAY_MS)
+        }
     }
 
     /**
@@ -912,12 +924,14 @@ class FloatingWidgetService : Service() {
      */
     private fun captureFrame(attempt: Int) {
         if (!isRunning) {
+            showOverlayAfterCapture()
             finishAnalysis()
             return
         }
 
         val reader = imageReader
         if (reader == null) {
+            showOverlayAfterCapture()
             reportFailure("Screen capture is not ready. Stop and start the widget again.")
             finishAnalysis()
             return
@@ -941,15 +955,27 @@ class FloatingWidgetService : Service() {
             if (attempt < MAX_FRAME_ATTEMPTS) {
                 handler.postDelayed({ captureFrame(attempt + 1) }, FRAME_RETRY_MS)
             } else {
+                showOverlayAfterCapture()
                 reportFailure("No frame came from the screen. Keep the chart visible and tap again.")
                 finishAnalysis()
             }
             return
         }
 
+        // The frame is captured, so the widget can come back while the model runs.
+        showOverlayAfterCapture()
         val payload = bitmapToBase64(bitmap)
         bitmap.recycle()
         sendForAnalysis(payload)
+    }
+
+    private fun showOverlayAfterCapture() {
+        handler.post {
+            if (hideOverlayForCapture) {
+                hideOverlayForCapture = false
+                overlayView?.visibility = View.VISIBLE
+            }
+        }
     }
 
     private fun imageToBitmap(image: android.media.Image): Bitmap? {
@@ -1027,14 +1053,14 @@ class FloatingWidgetService : Service() {
                 if (requestMode == MODE_FOREX) {
                     body.put(
                         "min_confidence",
-                        prefs.getInt(KEY_FOREX_MIN_CONFIDENCE, 70),
+                        prefs.getInt(KEY_FOREX_MIN_CONFIDENCE, 60),
                     )
                     body.put("preferred_timeframe", prefs.getString(KEY_FOREX_TIMEFRAME, "15M"))
                     body.put("user_custom_strategy", prefs.getString(KEY_FOREX_STRATEGY, ""))
                 } else {
                     body.put(
                         "min_confidence",
-                        prefs.getInt(KEY_BINARY_MIN_CONFIDENCE, 70),
+                        prefs.getInt(KEY_BINARY_MIN_CONFIDENCE, 60),
                     )
                     body.put(
                         "preferred_duration_seconds",
@@ -1045,8 +1071,11 @@ class FloatingWidgetService : Service() {
 
                 val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
-                    connectTimeout = 15_000
-                    readTimeout = 75_000
+                    connectTimeout = 20_000
+                    // The backend budget is 70 s (GEMINI_TIMEOUT_MS). A client
+                    // timeout of 75 s fired in the same instant as the answer and
+                    // showed "timeout" on correct scans, so leave real headroom.
+                    readTimeout = 110_000
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=utf-8")
                     setRequestProperty("Accept", "application/json")

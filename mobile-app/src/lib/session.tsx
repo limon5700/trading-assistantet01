@@ -26,10 +26,10 @@ const VOICE_KEY = 'ai_trading_voice_enabled';
 const TRADE_KEY = 'ai_trading_trade_settings';
 
 export const DEFAULT_TRADE_SETTINGS: TradeSettings = {
-  binary_min_confidence: 70,
+  binary_min_confidence: 60,
   binary_duration_seconds: 60,
   binary_strategy: '',
-  forex_min_confidence: 70,
+  forex_min_confidence: 60,
   forex_timeframe: '15M',
   forex_strategy: '',
 };
