@@ -127,10 +127,18 @@ class FloatingWidgetService : Service() {
         /** An answer this fresh is delivered on tap without another scan. */
         private const val CACHE_FRESH_MS = 20_000L
         private const val CAPTURE_DELAY_MS = 300L
-        private const val MAX_CAPTURE_WIDTH = 1280
+        // A live clip, not a still: the model has to see the candle move.
+        private const val LIVE_FRAME_COUNT = 4
+        private const val LIVE_FRAME_GAP_MS = 350L
+        private const val LIVE_ROUNDS = 3
+        private const val LIVE_ROUND_GAP_MS = 450L
+        private const val MAX_CAPTURE_WIDTH = 960
         private const val JPEG_QUALITY = 80
         private const val MAX_FRAME_ATTEMPTS = 8
         private const val FRAME_RETRY_MS = 150L
+        // A frame this dark is the mirror surface, never the chart.
+        private const val MIN_FRAME_MEAN_LUMA = 10.0
+        private const val MIN_FRAME_BRIGHT_RATIO = 0.05
 
         @Volatile
         var isRunning: Boolean = false
@@ -171,6 +179,9 @@ class FloatingWidgetService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+    private val liveFrames = mutableListOf<String>()
+    private var liveMisses = 0
+    private var liveRound = 0
     private var projectionCallback: MediaProjection.Callback? = null
 
     private val handler = Handler(Looper.getMainLooper())
@@ -913,32 +924,42 @@ class FloatingWidgetService : Service() {
         handler.post {
             hideOverlayForCapture = hideForFrame
             if (hideForFrame) overlayView?.visibility = View.INVISIBLE
-            handler.postDelayed({ captureFrame(0) }, CAPTURE_DELAY_MS)
+            handler.postDelayed({ beginLiveCapture() }, CAPTURE_DELAY_MS)
         }
     }
 
     /**
-     * Grabs a real frame from MediaProjection. The first frames after a capture
-     * session starts can be empty, so retry briefly instead of posting an empty
-     * screenshot (which used to surface as "Analysis Failed").
+     * Starts one live capture: a short burst of consecutive frames instead of a
+     * single still, so the model can see the newest candle actually moving.
      */
-    private fun captureFrame(attempt: Int) {
+    private fun beginLiveCapture() {
+        liveFrames.clear()
+        liveMisses = 0
+        liveRound = 0
+        handler.postDelayed({ captureLiveFrame() }, CAPTURE_DELAY_MS)
+    }
+
+    /**
+     * Grabs one live frame from MediaProjection. A frame that comes back black or
+     * empty is thrown away and asked for again: sending it used to make the model
+     * answer "the screenshot is completely black" and post a fake WAIT. When a
+     * whole round of frames is black the mirror surface itself is stale, so the
+     * virtual display is rebuilt before the next round.
+     */
+    private fun captureLiveFrame() {
         if (!isRunning) {
-            showOverlayAfterCapture()
-            finishAnalysis()
+            liveCaptureFailed("Screen capture stopped. Start the widget again.")
             return
         }
 
         val reader = imageReader
         if (reader == null) {
-            showOverlayAfterCapture()
-            reportFailure("Screen capture is not ready. Stop and start the widget again.")
-            finishAnalysis()
+            liveCaptureFailed("Screen capture is not ready. Stop and start the widget again.")
             return
         }
 
-        var bitmap: Bitmap? = null
         var image: android.media.Image? = null
+        var bitmap: Bitmap? = null
         try {
             image = reader.acquireLatestImage()
             if (image != null && image.width > 0 && image.height > 0) {
@@ -950,23 +971,118 @@ class FloatingWidgetService : Service() {
             image?.close()
         }
 
-        if (bitmap == null || bitmap.width <= 0 || bitmap.height <= 0) {
-            bitmap?.recycle()
-            if (attempt < MAX_FRAME_ATTEMPTS) {
-                handler.postDelayed({ captureFrame(attempt + 1) }, FRAME_RETRY_MS)
-            } else {
-                showOverlayAfterCapture()
-                reportFailure("No frame came from the screen. Keep the chart visible and tap again.")
-                finishAnalysis()
+        // A sized frame can still be an all-black mirror surface.
+        if (bitmap != null && !isFrameReadable(bitmap)) {
+            bitmap.recycle()
+            bitmap = null
+        }
+
+        if (bitmap == null) {
+            liveMisses += 1
+            if (liveMisses < MAX_FRAME_ATTEMPTS) {
+                handler.postDelayed({ captureLiveFrame() }, FRAME_RETRY_MS)
+                return
             }
+
+            liveMisses = 0
+            liveRound += 1
+            if (liveRound >= LIVE_ROUNDS) {
+                liveCaptureFailed(
+                    "The chart came back black. Keep the chart on screen, turn off any " +
+                        "'block screenshots' setting in the broker app, then tap again.",
+                )
+                return
+            }
+            rebuildCaptureSurface()
+            handler.postDelayed({ captureLiveFrame() }, LIVE_ROUND_GAP_MS)
             return
         }
 
-        // The frame is captured, so the widget can come back while the model runs.
-        showOverlayAfterCapture()
-        val payload = bitmapToBase64(bitmap)
+        liveMisses = 0
+        liveFrames.add(bitmapToBase64(bitmap))
         bitmap.recycle()
-        sendForAnalysis(payload)
+
+        if (liveFrames.size >= LIVE_FRAME_COUNT) {
+            val clip = liveFrames.toList()
+            liveFrames.clear()
+            // The clip is captured, so the widget can come back while the model runs.
+            showOverlayAfterCapture()
+            sendForAnalysis(clip)
+            return
+        }
+
+        handler.postDelayed({ captureLiveFrame() }, LIVE_FRAME_GAP_MS)
+    }
+
+    private fun liveCaptureFailed(message: String) {
+        liveFrames.clear()
+        showOverlayAfterCapture()
+        reportFailure(message)
+        finishAnalysis(delivered = false)
+    }
+
+    /** A 32x32 luminance sample: the chart is bright, a dead mirror frame is black. */
+    private fun isFrameReadable(bitmap: Bitmap): Boolean {
+        if (bitmap.width <= 0 || bitmap.height <= 0) return false
+
+        var sample: Bitmap? = null
+        return try {
+            sample = Bitmap.createScaledBitmap(bitmap, 32, 32, false)
+            val pixels = IntArray(32 * 32)
+            sample.getPixels(pixels, 0, 32, 0, 0, 32, 32)
+
+            var lumaSum = 0.0
+            var bright = 0
+            for (pixel in pixels) {
+                val red = (pixel shr 16) and 0xFF
+                val green = (pixel shr 8) and 0xFF
+                val blue = pixel and 0xFF
+                val luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+                lumaSum += luma
+                if (luma > 24.0) bright += 1
+            }
+
+            val mean = lumaSum / pixels.size
+            val brightRatio = bright.toDouble() / pixels.size
+            val readable = mean >= MIN_FRAME_MEAN_LUMA && brightRatio >= MIN_FRAME_BRIGHT_RATIO
+            if (!readable) {
+                Log.w(
+                    TAG,
+                    "Dropped a black frame (mean luma " +
+                        String.format(Locale.US, "%.1f", mean) +
+                        ")",
+                )
+            }
+            readable
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not inspect the captured frame", error)
+            // Unreadable inspection must not block a real capture.
+            true
+        } finally {
+            sample?.recycle()
+        }
+    }
+
+    /** Recreates the mirror display so the next frames are freshly composited. */
+    private fun rebuildCaptureSurface() {
+        val projection = mediaProjection ?: return
+        try {
+            virtualDisplay?.release()
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not release the capture display", error)
+        }
+        virtualDisplay = null
+        try {
+            imageReader?.close()
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not close the capture reader", error)
+        }
+        imageReader = null
+        try {
+            createVirtualDisplay(projection)
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not rebuild the capture display", error)
+        }
     }
 
     private fun showOverlayAfterCapture() {
@@ -1020,7 +1136,8 @@ class FloatingWidgetService : Service() {
         return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
     }
 
-    private fun sendForAnalysis(imageBase64: String) {
+    private fun sendForAnalysis(frames: List<String>) {
+        val imageBase64 = frames.firstOrNull().orEmpty()
         if (serverUrl.isBlank()) {
             reportFailure("This build has no backend URL. Reinstall the official app.")
             finishAnalysis()
@@ -1049,6 +1166,16 @@ class FloatingWidgetService : Service() {
                     .put("currentTime", now)
                     .put("timezone", timezone)
                     .put("mode", requestMode)
+
+                // The whole live clip travels with the scan: the first frame stays
+                // in imageBase64 so nothing older breaks, the rest let the model
+                // read movement between frames.
+                if (frames.size > 1) {
+                    val clip = org.json.JSONArray()
+                    frames.forEach { clip.put(it) }
+                    body.put("frames", clip)
+                    body.put("frameIntervalMs", LIVE_FRAME_GAP_MS)
+                }
 
                 if (requestMode == MODE_FOREX) {
                     body.put(

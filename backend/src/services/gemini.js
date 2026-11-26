@@ -5,6 +5,9 @@ const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
 
 export const ANALYSIS_MODES = ['BINARY', 'FOREX'];
 
+// Frames of one live capture clip sent to a single model call.
+const MAX_LIVE_FRAMES = 6;
+
 const SIGNAL_ENUM = ['BUY', 'SELL', 'WAIT'];
 const CANDLE_ENTRY_ENUM = ['RUNNING_CANDLE', 'NEXT_CANDLE'];
 
@@ -610,6 +613,21 @@ function describeGeminiError(error) {
   return { error, kind: 'transient' };
 }
 
+/**
+ * A WAIT that says the picture itself was black, blank or unreadable is a failed
+ * capture, not a market call. Handing it back as a signal is what made the widget
+ * sit on a fabricated "WAIT 0%" while the trader's chart was perfectly readable.
+ */
+const BLIND_CAPTURE_PATTERN =
+  /(screenshot|image|frame|picture|chart)[^.\n]{0,70}(black|blank|empty|unreadable|unclear|not visible|cannot be (seen|read)|can't be (seen|read)|not readable|too dark)/i;
+
+export function isBlindCapture(analysis) {
+  if (!analysis || analysis.signal !== 'WAIT') return false;
+  if (Number(analysis.confidence) > 20) return false;
+  const reason = `${analysis.reason || ''} ${analysis.voice_summary || ''}`;
+  return BLIND_CAPTURE_PATTERN.test(reason);
+}
+
 function parseModelJson(text) {
   try {
     return JSON.parse(text);
@@ -629,6 +647,8 @@ function parseModelJson(text) {
 export async function analyzeChart({
   imageBase64,
   mimeType,
+  frames = [],
+  frameIntervalMs = 0,
   currentTime,
   timezone,
   mode,
@@ -660,6 +680,36 @@ export async function analyzeChart({
       : 'TRADER STRATEGY: none supplied for this scan, use the built-in price-action rules.',
   ].join('\n\n');
 
+  // A live scan ships consecutive screen frames; a still scan ships one image.
+  const liveFrames = (Array.isArray(frames) ? frames : [])
+    .filter((frame) => frame && typeof frame.imageBase64 === 'string' && frame.imageBase64.length > 256)
+    .slice(0, MAX_LIVE_FRAMES);
+  const imageParts = liveFrames.length
+    ? liveFrames.map((frame) => ({
+        inlineData: { mimeType: frame.mimeType || mimeType, data: frame.imageBase64 },
+      }))
+    : [{ inlineData: { mimeType, data: imageBase64 } }];
+
+  const frameGap = Math.max(0, Math.round(Number(frameIntervalMs) || 0));
+  const liveNote =
+    liveFrames.length > 1
+      ? `LIVE CLIP: these ${liveFrames.length} images are consecutive frames of the same chart in capture order${frameGap ? `, about ${frameGap} ms apart` : ''}. Read them as a short screen recording: how the newest candle's body and wicks are growing, how price reacts at the level, and whether momentum is accelerating or stalling between frames. Movement between frames is live evidence. Use the LAST frame for the current price and for entry, stop-loss and take-profit. A readable chart is never "black" or "unreadable".`
+      : '';
+
+  const scanPrompt = [
+    liveNote,
+    `Analyse this chart ${liveFrames.length > 1 ? 'live frame sequence' : 'screenshot'} for a ${resolvedMode} trade.`,
+    `Trader local time: ${currentTime || 'unknown'}`,
+    `Trader timezone: ${timezone || 'unknown'}`,
+    `Minimum confidence: ${threshold}%`,
+    resolvedMode === 'BINARY'
+      ? `Preferred duration: ${preferredDuration || 60} seconds`
+      : `Preferred timeframe: ${normalizeTimeframe(preferredTimeframe, '15M')}`,
+    'Read the chart first, then apply the trader\'s strategy together with your own market knowledge, name the rule that decided the trade, and only then return the JSON decision. If no rule is satisfied, return WAIT.',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
   const models = buildModelChain();
   const deadline = Date.now() + config.gemini.timeoutMs;
   const attempted = [];
@@ -688,18 +738,7 @@ export async function analyzeChart({
       attempted.push(modelName);
       try {
         const result = await withTimeout(
-          model.generateContent([
-            { inlineData: { mimeType, data: imageBase64 } },
-            {
-              text: `Analyse this chart screenshot for a ${resolvedMode} trade.
-Trader local time: ${currentTime || 'unknown'}
-Trader timezone: ${timezone || 'unknown'}
-Minimum confidence: ${threshold}%
-${resolvedMode === 'BINARY' ? `Preferred duration: ${preferredDuration || 60} seconds` : `Preferred timeframe: ${normalizeTimeframe(preferredTimeframe, '15M')}`}
-
-Read the chart first, then apply the trader's strategy together with your own market knowledge, name the rule that decided the trade, and only then return the JSON decision. If no rule is satisfied, return WAIT.`,
-            },
-          ]),
+          model.generateContent([...imageParts, { text: scanPrompt }]),
           Math.min(remaining, config.gemini.attemptTimeoutMs),
         );
 
@@ -709,6 +748,18 @@ Read the chart first, then apply the trader's strategy together with your own ma
           minConfidence: threshold,
           preferredDuration,
         });
+        if (isBlindCapture(analysis)) {
+          // Retrying the same blind frames would only repeat this answer, so stop
+          // the loop and tell the app to capture again instead of posting a WAIT.
+          throw Object.assign(
+            analysisError(
+              'The screen frame arrived black and unreadable, so this scan was dropped. Keep the chart on screen and scan again.',
+              422,
+              'CAPTURE_UNREADABLE',
+            ),
+            { blindCapture: true },
+          );
+        }
         modelCooldown.delete(modelName);
         return {
           analysis,
@@ -717,6 +768,7 @@ Read the chart first, then apply the trader's strategy together with your own ma
           modelsAttempted: attempted,
         };
       } catch (error) {
+        if (error?.blindCapture) throw error;
         const timedOut = String(error?.message || '').includes('timed out');
         const { error: mapped, kind } = timedOut
           ? { error: analysisError('Gemini request timed out', 504, 'GEMINI_TIMEOUT'), kind: 'transient' }

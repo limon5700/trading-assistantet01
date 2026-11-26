@@ -93,6 +93,26 @@ function resolveImage(req) {
   return normalizeImage(req.body?.imageBase64);
 }
 
+/**
+ * A live scan sends a short burst of screen frames. The first frame stays in
+ * `imageBase64` for older clients, so the extra frames are optional and one
+ * damaged frame never costs the whole scan.
+ */
+const MAX_LIVE_FRAMES = 6;
+
+function resolveLiveFrames(req) {
+  const raw = req.body?.frames;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+
+  const frames = [];
+  for (const item of raw.slice(0, MAX_LIVE_FRAMES)) {
+    const normalized = normalizeImage(item);
+    if (normalized.error) continue;
+    frames.push({ imageBase64: normalized.data, mimeType: normalized.mimeType });
+  }
+  return frames;
+}
+
 function optionalString(value, maxLength) {
   return typeof value === 'string' ? value.slice(0, maxLength) : '';
 }
@@ -123,6 +143,8 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
     const image = resolveImage(req);
     if (image.error) return res.status(image.status || 400).json({ error: image.error });
 
+    const liveFrames = resolveLiveFrames(req);
+
     const body = req.body ?? {};
     const mode = normalizeMode(body.mode);
     const savedSettings = await getTradeSettings(user.id);
@@ -147,6 +169,8 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
     const { analysis, strategySource, model, modelsAttempted } = await analyzeChart({
       imageBase64: image.data,
       mimeType: image.mimeType,
+      frames: liveFrames,
+      frameIntervalMs: optionalNumber(body.frameIntervalMs, 0),
       currentTime: optionalString(body.currentTime ?? body.current_time, 64),
       timezone: optionalString(body.timezone, 64),
       mode,
