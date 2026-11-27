@@ -252,6 +252,8 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
         market_type: analysis.market_type,
         vetoes: analysis.vetoes,
         key_level: analysis.key_level,
+        next_candle_seconds: analysis.next_candle_seconds,
+        entry_window_seconds: analysis.entry_window_seconds,
         cooldown_seconds: cooldownSeconds || undefined,
         min_confidence: Math.round(minConfidence),
         model,

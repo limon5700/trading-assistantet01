@@ -123,9 +123,15 @@ class FloatingWidgetService : Service() {
          * The chart is read in the background so a tap can answer instantly, but
          * only a tap ever shows a signal; background results just fill the cache.
          */
-        private const val ANALYSIS_INTERVAL_MS = 6_000L
+        private const val ANALYSIS_INTERVAL_MS = 5_000L
         /** An answer this fresh is delivered on tap without another scan. */
         private const val CACHE_FRESH_MS = 20_000L
+        /**
+         * A directional call lives until its entry window closes, not until the
+         * cache looks old: a next-candle signal made 40 s before the open is
+         * still the call for that open, and rescanning it would only add latency.
+         */
+        private const val CACHED_SIGNAL_MAX_AGE_MS = 45_000L
 
         /**
          * One signal per trade, not one per tap. After a BUY or SELL is delivered
@@ -135,14 +141,16 @@ class FloatingWidgetService : Service() {
          */
         private const val SIGNAL_COOLDOWN_BUFFER_MS = 15_000L
         private const val SIGNAL_COOLDOWN_MIN_MS = 75_000L
-        private const val CAPTURE_DELAY_MS = 300L
-        // A live clip, not a still: the model has to see the candle move.
-        private const val LIVE_FRAME_COUNT = 4
-        private const val LIVE_FRAME_GAP_MS = 350L
+        private const val CAPTURE_DELAY_MS = 200L
+        // A live clip, not a still: the model has to see the candle move. Three
+        // frames already show momentum and cut the upload that used to push the
+        // signal past the candle open.
+        private const val LIVE_FRAME_COUNT = 3
+        private const val LIVE_FRAME_GAP_MS = 300L
         private const val LIVE_ROUNDS = 3
         private const val LIVE_ROUND_GAP_MS = 450L
-        private const val MAX_CAPTURE_WIDTH = 960
-        private const val JPEG_QUALITY = 80
+        private const val MAX_CAPTURE_WIDTH = 800
+        private const val JPEG_QUALITY = 72
         private const val MAX_FRAME_ATTEMPTS = 8
         private const val FRAME_RETRY_MS = 150L
         // A frame this dark is the mirror surface, never the chart.
@@ -213,6 +221,8 @@ class FloatingWidgetService : Service() {
     /** A delivered BUY/SELL keeps the widget in cooldown until this moment. */
     private var signalCooldownUntil = 0L
     private var lastDeliveredSignal = ""
+    /** Ticks the entry countdown over the card until the candle open. */
+    private var entryCountdown: Runnable? = null
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -753,6 +763,7 @@ class FloatingWidgetService : Service() {
             }
 
             stopScanEffect()
+            stopEntryCountdown()
             applySignalTheme(signal)
             applySignalBadge(bubbleSignal, signal)
             applySignalBadge(signalBadge, signal)
@@ -785,6 +796,8 @@ class FloatingWidgetService : Service() {
                 timingText?.text = "Duration: $expiry  ·  ${analysis.optString("entry_time", "—")}"
                 levelsText?.text = "Expiry ${seconds}s · Grade $grade · Trend $trend · $market"
             }
+
+            startEntryCountdown(analysis)
 
             reasonText?.text = analysis.optString("reason", "")
             voiceText?.text = analysis.optString("voice_summary", "")
@@ -910,13 +923,21 @@ class FloatingWidgetService : Service() {
         if (showCooldownIfActive()) return
 
         val cached = cachedAnalysis
-        if (cached != null && System.currentTimeMillis() - cachedAt < CACHE_FRESH_MS) {
+        val cachedAge = System.currentTimeMillis() - cachedAt
+        val cachedSignal = cached?.optString("signal")?.uppercase(Locale.US)
+        val cachedDirectional = cachedSignal == "BUY" || cachedSignal == "SELL"
+        val cachedFresh = cached != null &&
+            (cachedAge < CACHE_FRESH_MS || (cachedDirectional && cachedAge < CACHED_SIGNAL_MAX_AGE_MS))
+        if (cached != null && cachedFresh && !entryIsLate(cached)) {
             renderAnalysis(cached, speak = true)
             broadcastAnalysis(cached)
             noteDeliveredSignal(cached)
             updateStatus("Signal delivered · ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}")
             return
         }
+        // A cached call whose own entry window has closed is no longer a signal:
+        // showing it now is exactly the late entry that loses the expiry.
+        if (cached != null && cachedFresh) forgetCachedSignal()
 
         deliverWhenReady = true
         clearSignalCard()
@@ -979,11 +1000,101 @@ class FloatingWidgetService : Service() {
         if (signal != "BUY" && signal != "SELL") return
 
         val seconds = analysis.optInt("duration_seconds", 60).coerceIn(15, 300)
-        val waitMs = maxOf(SIGNAL_COOLDOWN_MIN_MS, seconds * 1000L + SIGNAL_COOLDOWN_BUFFER_MS)
-        signalCooldownUntil = System.currentTimeMillis() + waitMs
+        val now = System.currentTimeMillis()
+        // The trade runs from its entry, not from the tap: a next-candle call
+        // delivered a minute early still owns the minute after that open.
+        val entryAt = analysis.optLong("_entry_at", 0L).coerceAtLeast(now)
+        signalCooldownUntil = maxOf(
+            now + SIGNAL_COOLDOWN_MIN_MS,
+            entryAt + seconds * 1000L + SIGNAL_COOLDOWN_BUFFER_MS,
+        )
         lastDeliveredSignal = signal
         // The cached answer was just traded: a new tap must read the chart again.
         forgetCachedSignal()
+    }
+
+    /**
+     * The model reports the candle clock with the signal. Stamping absolute entry
+     * times here means a countdown still works after the answer was cached, and
+     * a call whose open already passed can be told apart from a live one.
+     */
+    private fun stampEntryWindow(analysis: JSONObject) {
+        val signal = analysis.optString("signal").uppercase(Locale.US)
+        if (signal != "BUY" && signal != "SELL") return
+
+        val nextCandle = analysis.optInt("next_candle_seconds", 0).coerceIn(0, 900)
+        val window = analysis.optInt("entry_window_seconds", 5).coerceIn(1, 120)
+        val entryAt = System.currentTimeMillis() + nextCandle * 1000L
+        analysis.put("_entry_at", entryAt)
+        analysis.put("_entry_until", entryAt + window * 1000L)
+    }
+
+    /** True when this signal's entry window is already over. */
+    private fun entryIsLate(analysis: JSONObject): Boolean {
+        val until = analysis.optLong("_entry_until", 0L)
+        return until > 0L && System.currentTimeMillis() > until
+    }
+
+    /** A BUY/SELL that missed its candle open is reported as a WAIT, never shown live. */
+    private fun markLateEntry(analysis: JSONObject): JSONObject {
+        val late = JSONObject(analysis.toString())
+        val signal = analysis.optString("signal").uppercase(Locale.US)
+        late.put("signal", "WAIT")
+        late.put("confidence", 0)
+        late.put("setup_grade", "—")
+        late.put(
+            "reason",
+            "Late entry: the $signal signal missed its candle open and its entry window has closed. " +
+                "No trade — tap Get signal for the fresh candle.",
+        )
+        late.put(
+            "voice_summary",
+            "That signal arrived too late for its candle. No trade. Scan again for the fresh candle.",
+        )
+        late.put("_entry_at", 0L)
+        late.put("_entry_until", 0L)
+        return late
+    }
+
+    /**
+     * Counts down to the candle open the model reported, so the trader sees
+     * "Entry in 7s" instead of a BUY that is already a few seconds old.
+     */
+    private fun startEntryCountdown(analysis: JSONObject) {
+        stopEntryCountdown()
+        if (mode == MODE_FOREX) return
+        val signal = analysis.optString("signal").uppercase(Locale.US)
+        if (signal != "BUY" && signal != "SELL") return
+        val entryAt = analysis.optLong("_entry_at", 0L)
+        if (entryAt <= 0L) return
+
+        val seconds = analysis.optInt("duration_seconds", 60)
+        val expiry = analysis.optString("expiry_label").ifBlank { "${seconds}s" }
+        val runnable = object : Runnable {
+            override fun run() {
+                val left = entryAt - System.currentTimeMillis()
+                when {
+                    left > 1_500L -> {
+                        timingText?.text = "Entry in ${((left + 999) / 1000).toInt()}s · $expiry"
+                        handler.postDelayed(this, 500L)
+                    }
+
+                    left > -1_500L -> {
+                        timingText?.text = "ENTRY NOW · $expiry"
+                        speak("Enter now.")
+                    }
+
+                    else -> timingText?.text = "Entry window passed · $expiry"
+                }
+            }
+        }
+        entryCountdown = runnable
+        handler.post(runnable)
+    }
+
+    private fun stopEntryCountdown() {
+        entryCountdown?.let { handler.removeCallbacks(it) }
+        entryCountdown = null
     }
 
     private fun captureAndAnalyze() {
@@ -1322,15 +1433,26 @@ class FloatingWidgetService : Service() {
                     return@execute
                 }
 
+                // The model reports the candle clock with the signal, so the
+                // entry becomes an absolute time before the answer is cached.
+                stampEntryWindow(analysis)
+
                 // Every answer warms the cache, but only the scan the trader
-                // asked for reaches the card and the voice.
+                // asked for reaches the card and the voice. A call that already
+                // missed its open is a WAIT, not a late BUY.
                 val speakNow = deliverWhenReady
                 val showNow = speakNow || showWhenReady
-                rememberAnalysis(analysis)
+                val late = showNow && entryIsLate(analysis)
+                if (late) {
+                    forgetCachedSignal()
+                } else {
+                    rememberAnalysis(analysis)
+                }
+                val display = if (late) markLateEntry(analysis) else analysis
                 if (showNow) {
-                    renderAnalysis(analysis, speak = speakNow)
-                    broadcastAnalysis(analysis)
-                    noteDeliveredSignal(analysis)
+                    renderAnalysis(display, speak = speakNow)
+                    broadcastAnalysis(display)
+                    if (!late) noteDeliveredSignal(display)
                 }
                 finishAnalysis(delivered = showNow)
             } catch (error: Exception) {

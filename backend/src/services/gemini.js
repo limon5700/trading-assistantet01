@@ -84,6 +84,16 @@ const MODE_SCHEMAS = {
         type: SchemaType.STRING,
         description: 'The level that decides this trade, e.g. "resistance 3641.50 / round 3640.00".',
       },
+      next_candle_seconds: {
+        type: SchemaType.INTEGER,
+        description:
+          'Seconds from the moment of this answer until the next candle opens, read from the chart candle timer. 0 only when the new candle has just opened.',
+      },
+      entry_window_seconds: {
+        type: SchemaType.INTEGER,
+        description:
+          'How many seconds after that open the entry is still worth taking: 3-10 on a 1M chart, 5-15 on 5M, 15-30 on 15M. A late entry loses the expiry.',
+      },
       asset: { type: SchemaType.STRING, description: 'Instrument printed on the chart, e.g. "EUR/USD (OTC)".' },
       candle_entry: {
         type: SchemaType.STRING,
@@ -118,6 +128,8 @@ const MODE_SCHEMAS = {
       'entry_timing',
       'vetoes',
       'key_level',
+      'next_candle_seconds',
+      'entry_window_seconds',
       'asset',
       'candle_entry',
       'duration_seconds',
@@ -245,8 +257,8 @@ A BUY or SELL exists only when all seven checks below pass on the visible chart.
    Price stalls at round levels: .0000, .5000, .2500, and .00 / .50 on gold. If the entry sits within 0.05% of such a level and price has not yet broken it, the round number is a wall — veto ROUND_NUMBER. A clean break and retest of the round level is not a veto; say so in key_level.
 5. CANDLESTICK STRUCTURE AND MOMENTUM
    Judge the last three closed candles: body size against the 10-candle average, wick length, doji/indecision and exhaustion. A large candle (body >= 2x average) immediately followed by an opposite call is a veto: EXHAUSTION_CANDLE, because price usually needs one to two more candles before turning. A doji or a long opposing wick against the signal is unconfirmed: WAIT or grade C. Small overlapping bodies alternating colour, two or more inside bars, or spikes that retrace at once: veto CHOPPY_MARKET. Momentum must be steady or accelerating in the signal direction across the live frames, not fading.
-6. ENTRY PRICE AND PULLBACK POSITION
-   Report entry_timing. Do not buy the top of a finished move or sell its bottom: if the current candle has already travelled more than about 60% of the average candle range in the signal direction and price is not at the level, set CHASING and WAIT for the pullback. The best entry is a pullback that reached the level and turned, or a break that closed and is now retesting. A correct direction entered too late still loses the expiry.
+6. ENTRY PRICE AND PULLBACK POSITION AND CANDLE CLOCK
+   Report entry_timing. Do not buy the top of a finished move or sell its bottom: if the current candle has already travelled more than about 60% of the average candle range in the signal direction and price is not at the level, set CHASING and WAIT for the pullback. The best entry is a pullback that reached the level and turned, or a break that closed and is now retesting. A correct direction entered too late still loses the expiry. Report next_candle_seconds and entry_window_seconds from the chart's candle timer: the app counts down to that open and refuses an entry whose window has closed, so an honest clock is what makes the signal arrive on time.
 7. MARKET CONDITION, OTC AND NEWS
    Report market_type. OTC charts are algorithmic: they spike, gap and respect levels less, so an OTC BUY or SELL needs setup_grade A, a clean level and confidence of at least 72; anything less is WAIT. Choppy, spike-heavy or dead-low-volatility markets are a WAIT. If the trader's strategy or the visible clock puts a high-impact news release inside the expiry, veto NEWS_RISK. Never invent a news event that is not visible or supplied.
 
@@ -263,6 +275,7 @@ BINARY RULES
 - Trade the CURRENT impulse at the level price is reacting to, not a long-term forecast. Continuation with the last 2-3 candles is the default when price has room; a reversal needs a validated level, a rejection candle or a liquidity sweep, grade A and confidence of at least 78.
 - Five-second and fifteen-second expiries are only valid on a seconds chart; otherwise use the trader's preferred duration.
 - expiry_label must describe duration_seconds, e.g. "1 Minute (60s)" or "5 Minutes (300s)".
+- CANDLE CLOCK: the app schedules the entry from your answer, so read the candle timer on the chart into next_candle_seconds (seconds until the next candle opens; 0 only when it has just opened) and set entry_window_seconds to how many seconds after that open the entry is still worth taking (3-10 on a 1M chart, 5-15 on 5M, 15-30 on 15M). Your frames reach the app several seconds after you see them, so a running-candle entry needs at least 10 seconds of candle left; if less remains, plan the NEXT candle and give its countdown. Never hand the app a window that has already closed.
 - entry_time: "Immediate" for RUNNING_CANDLE only after a candle closed at the level, "Next Candle Open" for NEXT_CANDLE.
 - Fill every quality field honestly: chart_timeframe, market_type, trend_bias, setup_grade, expiry_fit, entry_timing, vetoes and key_level. Use ["NONE"] in vetoes only when all seven gates passed.
 - If the asset is not readable use "unknown"; never invent a broker or pair.`;
@@ -528,6 +541,12 @@ function normalizeChartTimeframe(raw) {
   return CHART_TIMEFRAME_ENUM.includes(value) ? value : 'UNKNOWN';
 }
 
+function clampInt(value, min, max, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(parsed)));
+}
+
 export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDuration = null }) {
   if (!raw || typeof raw !== 'object') throw new Error('Model returned no JSON object');
 
@@ -647,6 +666,10 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
 
   if (resolvedMode === 'BINARY') {
     const durationSeconds = binaryDuration ?? normalizeDuration(raw.duration_seconds, preferredDuration);
+    // The candle clock travels with the signal so the widget can schedule the
+    // entry at the next candle open instead of handing over a stale call.
+    const nextCandleSeconds = clampInt(raw.next_candle_seconds, 0, 900, 0);
+    const entryWindowSeconds = clampInt(raw.entry_window_seconds, 1, 120, 5);
     const voiceSummary =
       finalSignal === 'WAIT'
         ? waitVoice
@@ -659,6 +682,8 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
       ...base,
       chart_timeframe: chartTimeframe,
       expiry_fit: expiryFit || 'UNKNOWN',
+      next_candle_seconds: nextCandleSeconds,
+      entry_window_seconds: entryWindowSeconds,
       duration_seconds: durationSeconds,
       expiry_label: compact(raw.expiry_label, 48) || expiryLabelFor(durationSeconds),
       entry_time: normalizeEntryTime(raw.entry_time, candleEntry),
