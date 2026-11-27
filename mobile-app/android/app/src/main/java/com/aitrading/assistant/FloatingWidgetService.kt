@@ -124,6 +124,23 @@ class FloatingWidgetService : Service() {
          * only a tap ever shows a signal; background results just fill the cache.
          */
         private const val ANALYSIS_INTERVAL_MS = 5_000L
+        /**
+         * A scan takes several seconds to reach the model and answer, so the
+         * silent loop starts one this long before the candle open it is aiming at.
+         */
+        private const val CANDLE_SCAN_LEAD_MS = 12_000L
+        private val CANDLE_PERIOD_SECONDS = mapOf(
+            "5S" to 5L,
+            "15S" to 15L,
+            "30S" to 30L,
+            "1M" to 60L,
+            "2M" to 120L,
+            "5M" to 300L,
+            "15M" to 900L,
+            "30M" to 1_800L,
+            "1H" to 3_600L,
+            "4H" to 14_400L,
+        )
         /** An answer this fresh is delivered on tap without another scan. */
         private const val CACHE_FRESH_MS = 20_000L
         /**
@@ -223,15 +240,34 @@ class FloatingWidgetService : Service() {
     private var lastDeliveredSignal = ""
     /** Ticks the entry countdown over the card until the candle open. */
     private var entryCountdown: Runnable? = null
+    /** When the next scan must start to land on a candle open (0 = none). */
+    private var alignedScanAt = 0L
+    /** When this scan's capture began, so its share of the latency is logged. */
+    @Volatile
+    private var scanStartedAt = 0L
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var pendingSpeech: String? = null
 
-    /** Silent background analysis loop that keeps the cache warm. */
+    /**
+     * Silent background analysis loop that keeps the cache warm. A signal names
+     * the next candle it is for, so the loop sleeps until 12 s before that open
+     * and captures then: the answer lands on the open instead of mid-candle.
+     */
     private val analysisLoop = object : Runnable {
         override fun run() {
             if (!isRunning) return
+            val wait = alignedScanAt - System.currentTimeMillis()
+            if (alignedScanAt > 0L && wait > 500L) {
+                handler.postDelayed(this, wait)
+                return
+            }
+            alignedScanAt = 0L
+            if (analyzing) {
+                handler.postDelayed(this, 2_000L)
+                return
+            }
             captureAndAnalyze()
             handler.postDelayed(this, ANALYSIS_INTERVAL_MS)
         }
@@ -821,6 +857,7 @@ class FloatingWidgetService : Service() {
     private fun forgetCachedSignal() {
         cachedAnalysis = null
         cachedAt = 0L
+        alignedScanAt = 0L
     }
 
     /** Starts (or restarts) the silent loop that keeps the cache warm. */
@@ -1022,11 +1059,57 @@ class FloatingWidgetService : Service() {
         val signal = analysis.optString("signal").uppercase(Locale.US)
         if (signal != "BUY" && signal != "SELL") return
 
-        val nextCandle = analysis.optInt("next_candle_seconds", 0).coerceIn(0, 900)
+        val reported = analysis.optInt("next_candle_seconds", 0)
+        val nextCandle = secondsToNextCandleOpen(analysis)
         val window = analysis.optInt("entry_window_seconds", 5).coerceIn(1, 120)
         val entryAt = System.currentTimeMillis() + nextCandle * 1000L
         analysis.put("_entry_at", entryAt)
         analysis.put("_entry_until", entryAt + window * 1000L)
+        Log.i(
+            TAG,
+            "Entry clock: model=${reported}s used=${nextCandle}s window=${window}s " +
+                "timeframe=${analysis.optString("chart_timeframe", "—")} entry=${analysis.optString("candle_entry", "—")}",
+        )
+    }
+
+    /**
+     * Seconds until the next candle opens. The model reads the chart's candle
+     * timer; when it reports nothing, broker candles are aligned to the clock,
+     * so the chart timeframe gives the same countdown instead of leaving the
+     * card with no entry time at all.
+     */
+    private fun secondsToNextCandleOpen(analysis: JSONObject): Int {
+        val reported = analysis.optInt("next_candle_seconds", 0)
+        if (reported in 1..900) return reported
+        if (analysis.optString("candle_entry").uppercase(Locale.US) != "NEXT_CANDLE") return 0
+
+        val timeframe = analysis.optString("chart_timeframe").uppercase(Locale.US)
+        val period = CANDLE_PERIOD_SECONDS[timeframe] ?: 60L
+        val nowSeconds = System.currentTimeMillis() / 1000L
+        return (period - nowSeconds % period).toInt().coerceIn(1, period.toInt())
+    }
+
+    /** Asks the silent loop to begin a scan just before the candle this call targets. */
+    private fun scheduleCandleAlignedScan(analysis: JSONObject) {
+        if (mode == MODE_FOREX) return
+        val signal = analysis.optString("signal").uppercase(Locale.US)
+        if (signal != "BUY" && signal != "SELL") return
+        if (analysis.optString("candle_entry").uppercase(Locale.US) != "NEXT_CANDLE") return
+
+        val entryAt = analysis.optLong("_entry_at", 0L)
+        if (entryAt <= 0L) return
+        val target = entryAt - CANDLE_SCAN_LEAD_MS
+        val now = System.currentTimeMillis()
+        if (target <= now + 2_000L) return
+        // Never park the whole loop on a far-away candle: the cache would go cold.
+        if (target - now > 90_000L) return
+
+        alignedScanAt = target
+        Log.i(
+            TAG,
+            "Candle-aligned scan scheduled in ${(target - now) / 1000}s " +
+                "(12s before the open of ${analysis.optString("asset", "—")} next candle)",
+        )
     }
 
     /** True when this signal's entry window is already over. */
@@ -1100,6 +1183,7 @@ class FloatingWidgetService : Service() {
     private fun captureAndAnalyze() {
         if (analyzing || !isRunning) return
         analyzing = true
+        scanStartedAt = System.currentTimeMillis()
         setActionsEnabled(false)
         // Only a tap puts the card into a scanning state; the background loop
         // must never wipe the signal the trader is reading.
@@ -1405,14 +1489,26 @@ class FloatingWidgetService : Service() {
                 }
                 connection = conn
 
+                // Split the wait: connect + upload, then server + model, then the
+                // response body. The app logs all three with the server numbers.
+                val requestStart = System.currentTimeMillis()
                 OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
                     writer.write(body.toString())
                     writer.flush()
                 }
+                val uploadedAt = System.currentTimeMillis()
 
                 val status = conn.responseCode
+                val answeredAt = System.currentTimeMillis()
                 val stream = if (status in 200..299) conn.inputStream else conn.errorStream
                 val responseText = stream?.bufferedReader()?.use(BufferedReader::readText).orEmpty()
+                val readAt = System.currentTimeMillis()
+
+                val uploadMs = uploadedAt - requestStart
+                val waitMs = answeredAt - uploadedAt
+                val readMs = readAt - answeredAt
+                val totalMs = readAt - scanStartedAt
+                val captureMs = (requestStart - scanStartedAt).coerceAtLeast(0L)
 
                 if (status !in 200..299) {
                     val message = runCatching {
@@ -1436,6 +1532,18 @@ class FloatingWidgetService : Service() {
                 // The model reports the candle clock with the signal, so the
                 // entry becomes an absolute time before the answer is cached.
                 stampEntryWindow(analysis)
+                scheduleCandleAlignedScan(analysis)
+
+                val serverTimings = analysis.optJSONObject("timings")
+                val geminiMs = serverTimings?.optLong("gemini_ms", 0L) ?: 0L
+                val serverMs = serverTimings?.optLong("server_ms", 0L) ?: 0L
+                Log.i(
+                    TAG,
+                    "Latency total=${totalMs}ms capture=${captureMs}ms upload=${uploadMs}ms " +
+                        "wait=${waitMs}ms read=${readMs}ms gemini=${geminiMs}ms server=${serverMs}ms " +
+                        "signal=${analysis.optString("signal")} " +
+                        "clock=${analysis.optInt("next_candle_seconds", 0)}s",
+                )
 
                 // Every answer warms the cache, but only the scan the trader
                 // asked for reaches the card and the voice. A call that already
@@ -1453,6 +1561,12 @@ class FloatingWidgetService : Service() {
                     renderAnalysis(display, speak = speakNow)
                     broadcastAnalysis(display)
                     if (!late) noteDeliveredSignal(display)
+                    if (totalMs > 0L) {
+                        updateStatus(
+                            "Delivered ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())} · " +
+                                "scan ${formatSeconds(totalMs)}s · model ${formatSeconds(geminiMs)}s",
+                        )
+                    }
                 }
                 finishAnalysis(delivered = showNow)
             } catch (error: Exception) {
@@ -1464,6 +1578,9 @@ class FloatingWidgetService : Service() {
             }
         }
     }
+
+    private fun formatSeconds(ms: Long): String =
+        String.format(Locale.US, "%.1f", ms / 1000.0)
 
     private fun finishAnalysis(delivered: Boolean = false) {
         analyzing = false

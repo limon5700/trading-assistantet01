@@ -171,6 +171,7 @@ function applySignalCooldown(userId, analysis) {
 }
 
 router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'), async (req, res, next) => {
+  const routeStartedAt = Date.now();
   try {
     // Re-read the account on every scan so suspensions and activations apply immediately.
     const user = await findUserById(req.userId);
@@ -219,6 +220,7 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
       strategySource,
       model,
       modelsAttempted,
+      latency,
     } = await analyzeChart({
       imageBase64: image.data,
       mimeType: image.mimeType,
@@ -234,6 +236,21 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
     });
 
     const { analysis, cooldownSeconds } = applySignalCooldown(user.id, freshAnalysis);
+
+    // Where the seconds went on the server: the model call versus everything
+    // else in the route. The widget adds its own capture/upload numbers.
+    const timings = {
+      gemini_ms: latency?.gemini_ms ?? null,
+      last_attempt_ms: latency?.last_attempt_ms ?? null,
+      model_attempts: latency?.attempts ?? modelsAttempted.length,
+      server_ms: Date.now() - routeStartedAt,
+    };
+    if (timings.gemini_ms !== null && timings.gemini_ms > 6000) {
+      console.warn(
+        `[analyze] slow model: ${timings.gemini_ms}ms (${timings.model_attempts} attempts, ${model}) for ${analysis.mode} ${analysis.signal}`,
+      );
+    }
+    const payload = { ...analysis, timings };
 
     await logActivity({
       userId: user.id,
@@ -254,6 +271,7 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
         key_level: analysis.key_level,
         next_candle_seconds: analysis.next_candle_seconds,
         entry_window_seconds: analysis.entry_window_seconds,
+        latency_ms: timings,
         cooldown_seconds: cooldownSeconds || undefined,
         min_confidence: Math.round(minConfidence),
         model,
@@ -269,7 +287,9 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
     res.set('X-Signal-Mode', analysis.mode);
     if (analysis.setup_grade) res.set('X-Setup-Grade', String(analysis.setup_grade));
     if (cooldownSeconds) res.set('X-Signal-Cooldown', String(cooldownSeconds));
-    return res.json(analysis);
+    res.set('X-Gemini-Ms', String(timings.gemini_ms ?? ''));
+    res.set('X-Server-Ms', String(timings.server_ms));
+    return res.json(payload);
   } catch (error) {
     if (String(error.message).includes('timed out')) {
       return res.status(504).json({ error: 'Analysis timed out, please try again' });

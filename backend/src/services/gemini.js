@@ -1027,6 +1027,7 @@ export async function analyzeChart({
 
   const models = buildModelChain();
   const deadline = Date.now() + config.gemini.timeoutMs;
+  const scanStartedAt = Date.now();
   const attempted = [];
   let lastError = null;
 
@@ -1051,6 +1052,7 @@ export async function analyzeChart({
       });
 
       attempted.push(modelName);
+      const attemptStartedAt = Date.now();
       try {
         const result = await withTimeout(
           model.generateContent([...imageParts, { text: scanPrompt }]),
@@ -1081,6 +1083,13 @@ export async function analyzeChart({
           strategySource: custom ? 'request' : 'builtin',
           model: modelName,
           modelsAttempted: attempted,
+          // Split out, so the app can show whether the wait was the model, the
+          // network or the scan itself.
+          latency: {
+            gemini_ms: Date.now() - scanStartedAt,
+            last_attempt_ms: Date.now() - attemptStartedAt,
+            attempts: attempted.length,
+          },
         };
       } catch (error) {
         if (error?.blindCapture) throw error;
