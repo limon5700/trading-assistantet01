@@ -31,6 +31,14 @@ const TREND_ENUM = ['UP', 'DOWN', 'SIDEWAYS'];
 const ENTRY_TIMING_ENUM = ['AT_LEVEL', 'PULLBACK_DONE', 'CHASING'];
 const EXPIRY_FIT_ENUM = ['GOOD', 'TOO_SHORT', 'TOO_LONG'];
 const CHART_TIMEFRAME_ENUM = ['5S', '15S', '30S', '1M', '2M', '5M', '15M', '30M', '1H', '4H', 'UNKNOWN'];
+const PLAYBOOK_ENUM = [
+  'NONE',
+  'LIVERMORE_PIVOT',
+  'TURTLE_BREAKOUT',
+  'RASCHKE_HOLY_GRAIL',
+  'DARVAS_BOX',
+  'SEYKOTA_TREND',
+];
 
 const MODE_SCHEMAS = {
   BINARY: {
@@ -84,6 +92,12 @@ const MODE_SCHEMAS = {
         type: SchemaType.STRING,
         description: 'The level that decides this trade, e.g. "resistance 3641.50 / round 3640.00".',
       },
+      playbook: {
+        type: SchemaType.STRING,
+        enum: PLAYBOOK_ENUM,
+        description:
+          'The classic setup that decided this trade: LIVERMORE_PIVOT, TURTLE_BREAKOUT, RASCHKE_HOLY_GRAIL, DARVAS_BOX or SEYKOTA_TREND. NONE when no playbook is satisfied or the signal is WAIT.',
+      },
       next_candle_seconds: {
         type: SchemaType.INTEGER,
         description:
@@ -128,6 +142,7 @@ const MODE_SCHEMAS = {
       'entry_timing',
       'vetoes',
       'key_level',
+      'playbook',
       'next_candle_seconds',
       'entry_window_seconds',
       'asset',
@@ -277,8 +292,45 @@ BINARY RULES
 - expiry_label must describe duration_seconds, e.g. "1 Minute (60s)" or "5 Minutes (300s)".
 - CANDLE CLOCK: the app schedules the entry from your answer, so read the candle timer on the chart into next_candle_seconds (seconds until the next candle opens; 0 only when it has just opened) and set entry_window_seconds to how many seconds after that open the entry is still worth taking (3-10 on a 1M chart, 5-15 on 5M, 15-30 on 15M). Your frames reach the app several seconds after you see them, so a running-candle entry needs at least 10 seconds of candle left; if less remains, plan the NEXT candle and give its countdown. Never hand the app a window that has already closed.
 - entry_time: "Immediate" for RUNNING_CANDLE only after a candle closed at the level, "Next Candle Open" for NEXT_CANDLE.
-- Fill every quality field honestly: chart_timeframe, market_type, trend_bias, setup_grade, expiry_fit, entry_timing, vetoes and key_level. Use ["NONE"] in vetoes only when all seven gates passed.
+- Fill every quality field honestly: chart_timeframe, market_type, trend_bias, setup_grade, expiry_fit, entry_timing, vetoes, key_level and playbook. Use ["NONE"] in vetoes only when all seven gates passed.
 - If the asset is not readable use "unknown"; never invent a broker or pair.`;
+
+// Five classic trader frameworks, distilled to what is visible on a live chart.
+// Each one is an experimental fixed-expiry adaptation of a method written for
+// other markets: they inform the chart read, they never replace the gates.
+const BINARY_PLAYBOOKS = `TRADER PLAYBOOKS — FIVE CLASSIC SETUPS FOR THIS CHART
+Pick the ONE playbook whose conditions the visible chart actually satisfies and report its code in playbook. None satisfied means NONE and WAIT. A playbook never overrides the seven quality gates: a failed gate is still a WAIT even when the playbook looks complete. Use closed candles only, never redraw a level after seeing the outcome, never treat a forming candle as confirmation, and name the deciding playbook rule in reason.
+
+1. LIVERMORE_PIVOT — pivotal-point break and retest
+- Mark a pivot that already existed before the signal candle: a swing high or low price reacted to at least twice.
+- Bullish: higher highs and higher lows (or a base after a decline), then a full candle CLOSE above the pivot. A wick above that closes back below is not a break.
+- The entry is the controlled retest that holds the broken level, followed by a bullish close or a break of the prior micro high. Bearish mirrors this below a pivotal support.
+- Cancel when price closes back through the pivot before entry; a break that never retests is grade B at best.
+
+2. TURTLE_BREAKOUT — Donchian channel break
+- Take the highest high or lowest low of the last 20 fully closed candles (55 for the slower variant), excluding the signal candle.
+- Require a full candle close beyond that channel with volatility expanding and the close staying outside it. An intrabar touch is not a breakout.
+- Reject an oversized breakout candle (body about 2x the average range) and a break with a nearer opposing level blocking the move.
+
+3. RASCHKE_HOLY_GRAIL — trend pullback resumption
+- Strong trend only: ADX(14) above about 30 and rising, or equivalent visible evidence — three or more same-direction candles with shallow, overlapping pullbacks.
+- Price pulls back toward the 20 EMA without breaking the last confirmed higher low (bullish) or lower high (bearish).
+- Enter only on resumption: a completed rejection/continuation candle, or a break of the prior bar's high or low. A bare touch of the EMA is never an entry.
+- Skip when price is stretched far from the EMA or momentum is rolling over.
+
+4. DARVAS_BOX — box break
+- Define the box from a completed consolidation with at least two reactions at the top and two at the bottom, drawn only from candles before the breakout.
+- Bullish: full candle close above the box top, preferably followed by a retest that holds above it. Bearish: close below the box floor with a failed retest.
+- Reject a candle that closes back inside the box, a box so wide the expiry cannot reach the far boundary, and a major level sitting immediately beyond the boundary.
+
+5. SEYKOTA_TREND — mechanical trend plus a fresh trigger
+- Fixed trend rule, never switched mid-read: EMA20 above EMA50 with both slopes up (or a close above a pre-defined resistance) for bullish, the mirror for bearish.
+- Require a FRESH continuation trigger on a completed candle: a higher low plus a break of the prior micro high, or a new close beyond the level.
+- Reject sideways drift that makes the trend rule whipsaw, an already extended trigger, and a signal that merely repeats the previous candle.
+
+PLAYBOOK RULES
+- A playbook entry still needs the trend, level and expiry gates: a box break into nearer resistance, or a pullback taken against the main trend, is WAIT.
+- These are cross-market adaptations of other traders' methods, not their binary systems; never state or imply that a historical trader endorsed this trade.`;
 
 const FOREX_INSTRUCTIONS = `You are an expert forex, gold and index intraday analyst embedded in a floating Android overlay. You receive a screenshot of a live candlestick chart and must return a complete, risk-managed trade plan.
 
@@ -541,6 +593,16 @@ function normalizeChartTimeframe(raw) {
   return CHART_TIMEFRAME_ENUM.includes(value) ? value : 'UNKNOWN';
 }
 
+function normalizePlaybook(raw) {
+  const value = String(raw ?? '').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if (/^JESSE/.test(value) || /^LIVERMORE/.test(value)) return 'LIVERMORE_PIVOT';
+  if (/^TURTLE/.test(value) || /^DENNIS/.test(value)) return 'TURTLE_BREAKOUT';
+  if (/^RASCHKE/.test(value) || /HOLY_GRAIL/.test(value)) return 'RASCHKE_HOLY_GRAIL';
+  if (/^DARVAS/.test(value)) return 'DARVAS_BOX';
+  if (/^SEYKOTA/.test(value)) return 'SEYKOTA_TREND';
+  return PLAYBOOK_ENUM.includes(value) ? value : 'NONE';
+}
+
 function clampInt(value, min, max, fallback = 0) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -682,6 +744,7 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
       ...base,
       chart_timeframe: chartTimeframe,
       expiry_fit: expiryFit || 'UNKNOWN',
+      playbook: normalizePlaybook(raw.playbook),
       next_candle_seconds: nextCandleSeconds,
       entry_window_seconds: entryWindowSeconds,
       duration_seconds: durationSeconds,
@@ -985,6 +1048,7 @@ export async function analyzeChart({
 
   const systemInstruction = [
     modeInstruction,
+    resolvedMode === 'BINARY' ? BINARY_PLAYBOOKS : '',
     CHART_READING_RULES,
     SIGNAL_QUALITY_GATE,
     OUTPUT_RULES,
@@ -993,7 +1057,9 @@ export async function analyzeChart({
     custom
       ? `TRADER'S STRATEGY (authoritative for this ${resolvedMode} scan; apply it literally and never contradict the risk rules):\n${custom}`
       : 'TRADER STRATEGY: none supplied for this scan, use the built-in price-action rules.',
-  ].join('\n\n');
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 
   // A live scan ships consecutive screen frames; a still scan ships one image.
   const liveFrames = (Array.isArray(frames) ? frames : [])
