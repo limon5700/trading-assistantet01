@@ -38,6 +38,11 @@ const PLAYBOOK_ENUM = [
   'RASCHKE_HOLY_GRAIL',
   'DARVAS_BOX',
   'SEYKOTA_TREND',
+  'LARRY_WILLIAMS_VOLATILITY',
+  'BROOKS_SECOND_ENTRY',
+  'WYCKOFF_SPRING_UTAD',
+  'MINERVINI_VCP',
+  'JONES_RISK_REVERSAL',
 ];
 
 const MODE_SCHEMAS = {
@@ -96,7 +101,7 @@ const MODE_SCHEMAS = {
         type: SchemaType.STRING,
         enum: PLAYBOOK_ENUM,
         description:
-          'The classic setup that decided this trade: LIVERMORE_PIVOT, TURTLE_BREAKOUT, RASCHKE_HOLY_GRAIL, DARVAS_BOX or SEYKOTA_TREND. NONE when no playbook is satisfied or the signal is WAIT.',
+          'Code of the classic setup that decided this trade (one of the ten playbook codes in the playbook library). NONE when no playbook is satisfied or the signal is WAIT.',
       },
       next_candle_seconds: {
         type: SchemaType.INTEGER,
@@ -298,8 +303,8 @@ BINARY RULES
 // Five classic trader frameworks, distilled to what is visible on a live chart.
 // Each one is an experimental fixed-expiry adaptation of a method written for
 // other markets: they inform the chart read, they never replace the gates.
-const BINARY_PLAYBOOKS = `TRADER PLAYBOOKS — FIVE CLASSIC SETUPS FOR THIS CHART
-Pick the ONE playbook whose conditions the visible chart actually satisfies and report its code in playbook. None satisfied means NONE and WAIT. A playbook never overrides the seven quality gates: a failed gate is still a WAIT even when the playbook looks complete. Use closed candles only, never redraw a level after seeing the outcome, never treat a forming candle as confirmation, and name the deciding playbook rule in reason.
+const BINARY_PLAYBOOKS = `TRADER PLAYBOOKS — TEN CLASSIC SETUPS FOR THIS CHART
+Pick the ONE playbook whose conditions the visible chart actually satisfies and report its exact code in playbook. None satisfied means NONE and WAIT. A playbook never overrides the seven quality gates: a failed gate is still a WAIT even when the playbook looks complete. Use closed candles only, never redraw a level after seeing the outcome, never treat a forming candle as confirmation, and name the deciding playbook rule in reason.
 
 1. LIVERMORE_PIVOT — pivotal-point break and retest
 - Mark a pivot that already existed before the signal candle: a swing high or low price reacted to at least twice.
@@ -327,6 +332,36 @@ Pick the ONE playbook whose conditions the visible chart actually satisfies and 
 - Fixed trend rule, never switched mid-read: EMA20 above EMA50 with both slopes up (or a close above a pre-defined resistance) for bullish, the mirror for bearish.
 - Require a FRESH continuation trigger on a completed candle: a higher low plus a break of the prior micro high, or a new close beyond the level.
 - Reject sideways drift that makes the trend rule whipsaw, an already extended trigger, and a signal that merely repeats the previous candle.
+
+6. LARRY_WILLIAMS_VOLATILITY — range expansion break with momentum support
+- The reference is a completed consolidation high/low or a fixed fraction of the prior completed range, never a forming candle.
+- Bullish: a strong close outside that reference with the range expanding against the recent average and the close near the candle high; bearish mirrors it near the low.
+- Williams %R(14) is context only: above -50 in an uptrend, below -50 in a downtrend. Overbought or oversold alone is never a reversal trigger.
+- Reject an entry after an outsized candle, or where a nearby level leaves no room before expiry.
+
+7. BROOKS_SECOND_ENTRY — two-leg pullback, second entry
+- Classify bull trend, bear trend or trading range from swing structure, not from one candle.
+- In a trend, find a pullback with two clear legs (or a first failed resumption attempt), then take the SECOND attempt: a completed close beyond the prior signal bar's high (bull) or low (bear).
+- State the leg count in reason. If the pattern is not clearly countable, or the second entry costs a much worse price than the first, it is not a setup — WAIT.
+- A trading range with no trend resumption is chop, not a second entry.
+
+8. WYCKOFF_SPRING_UTAD — false break out of a range
+- Mark a mature range after a prior decline (accumulation) or advance (distribution), from past candles only, and classify spring or upthrust only in that context.
+- Spring: price trades below range support then CLOSES back inside. UTAD: price trades above resistance and closes back inside. The false break is a candidate, not a signal.
+- Require the secondary test that holds: a higher low above the spring low, then strength — a wide bullish close toward range resistance or a local swing-high break (SOS). Bearish mirror: lower high, then a close below local support (SOW).
+- Cancel if price closes beyond the spring low or UTAD high before entry, or accepts outside the range through a retest. Never infer institutional orders or real volume from an FX tick feed.
+
+9. MINERVINI_VCP — contraction base break
+- Trend template, adapted and described as such: price above a rising EMA50 and EMA100 with EMA50 above EMA100.
+- Base with at least two successive contractions — each pullback shallower and tighter than the last; mark every range chronologically.
+- Enter on a completed close above the final contraction pivot, preferably with a retest that holds or a second bullish close.
+- Reject a base too wide for the expiry, an entry far extended above the pivot, and resistance immediately overhead. The bearish version (close below the final contraction low in a downtrend) is an experimental mirror, not the original method.
+
+10. JONES_RISK_REVERSAL — defence-first reversal
+- Pre-mark a higher-timeframe extreme (prior swing high or low) where the move is losing momentum; never call a top or bottom from an oscillator alone.
+- Require a failed continuation: a sweep of that extreme that closes back inside, a reclaim of the level, and a completed structure shift — a break of the latest lower high for BUY, the latest higher low for SELL.
+- Context gate first: an event-driven, spread-spikey or counter-higher-timeframe tape is WAIT. Never average down, never double the stake after a loss.
+- A reversal without the structure shift is a falling knife, not a setup.
 
 PLAYBOOK RULES
 - A playbook entry still needs the trend, level and expiry gates: a box break into nearer resistance, or a pullback taken against the main trend, is WAIT.
@@ -600,6 +635,11 @@ function normalizePlaybook(raw) {
   if (/^RASCHKE/.test(value) || /HOLY_GRAIL/.test(value)) return 'RASCHKE_HOLY_GRAIL';
   if (/^DARVAS/.test(value)) return 'DARVAS_BOX';
   if (/^SEYKOTA/.test(value)) return 'SEYKOTA_TREND';
+  if (/^LARRY/.test(value) || /WILLIAMS/.test(value)) return 'LARRY_WILLIAMS_VOLATILITY';
+  if (/^BROOKS/.test(value) || /SECOND_ENTRY/.test(value)) return 'BROOKS_SECOND_ENTRY';
+  if (/^WYCKOFF/.test(value) || /SPRING/.test(value) || /UTAD/.test(value)) return 'WYCKOFF_SPRING_UTAD';
+  if (/^MINERVINI/.test(value) || /^VCP/.test(value)) return 'MINERVINI_VCP';
+  if (/^JONES/.test(value) || /^PTJ/.test(value) || /TUDOR/.test(value)) return 'JONES_RISK_REVERSAL';
   return PLAYBOOK_ENUM.includes(value) ? value : 'NONE';
 }
 
