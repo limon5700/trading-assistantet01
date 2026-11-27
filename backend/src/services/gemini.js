@@ -10,6 +10,27 @@ const MAX_LIVE_FRAMES = 6;
 
 const SIGNAL_ENUM = ['BUY', 'SELL', 'WAIT'];
 const CANDLE_ENTRY_ENUM = ['RUNNING_CANDLE', 'NEXT_CANDLE'];
+// Every failed quality gate the model may report. "NONE" means all seven gates
+// passed; anything else downgrades the answer to WAIT in validateAnalysis.
+const VETO_ENUM = [
+  'NONE',
+  'OPPOSING_LEVEL',
+  'ROUND_NUMBER',
+  'EXHAUSTION_CANDLE',
+  'CHOPPY_MARKET',
+  'NEWS_RISK',
+  'LATE_ENTRY',
+  'COUNTER_TREND',
+  'EXPIRY_MISMATCH',
+  'NO_STRUCTURE',
+  'OTC_SPIKE',
+];
+const GRADE_ENUM = ['A', 'B', 'C', 'REJECT'];
+const MARKET_ENUM = ['REAL', 'OTC', 'UNKNOWN'];
+const TREND_ENUM = ['UP', 'DOWN', 'SIDEWAYS'];
+const ENTRY_TIMING_ENUM = ['AT_LEVEL', 'PULLBACK_DONE', 'CHASING'];
+const EXPIRY_FIT_ENUM = ['GOOD', 'TOO_SHORT', 'TOO_LONG'];
+const CHART_TIMEFRAME_ENUM = ['5S', '15S', '30S', '1M', '2M', '5M', '15M', '30M', '1H', '4H', 'UNKNOWN'];
 
 const MODE_SCHEMAS = {
   BINARY: {
@@ -22,6 +43,47 @@ const MODE_SCHEMAS = {
         description: 'BUY, SELL or WAIT for the selected candle entry.',
       },
       confidence: { type: SchemaType.INTEGER, description: 'Confidence 0-100.' },
+      chart_timeframe: {
+        type: SchemaType.STRING,
+        enum: CHART_TIMEFRAME_ENUM,
+        description: 'Candle interval actually printed on the chart, needed to match the expiry to the chart clock.',
+      },
+      market_type: {
+        type: SchemaType.STRING,
+        enum: MARKET_ENUM,
+        description: 'REAL for a live market, OTC when the chart is marked OTC, UNKNOWN when it cannot be read.',
+      },
+      trend_bias: {
+        type: SchemaType.STRING,
+        enum: TREND_ENUM,
+        description: 'Direction of the visible main trend: the last 8-20 candles and the swings that contain them.',
+      },
+      setup_grade: {
+        type: SchemaType.STRING,
+        enum: GRADE_ENUM,
+        description:
+          'A = all seven gates passed with confluence, B = all seven passed with one secondary confirmation missing, C = thin single argument, REJECT = unreadable or contradicted.',
+      },
+      expiry_fit: {
+        type: SchemaType.STRING,
+        enum: EXPIRY_FIT_ENUM,
+        description: 'Whether duration_seconds matches the chart candle interval and the remaining momentum.',
+      },
+      entry_timing: {
+        type: SchemaType.STRING,
+        enum: ENTRY_TIMING_ENUM,
+        description:
+          'AT_LEVEL when price is at the level now, PULLBACK_DONE when the pullback finished and price turned, CHASING when price already ran in the signal direction.',
+      },
+      vetoes: {
+        type: SchemaType.ARRAY,
+        items: { type: SchemaType.STRING, enum: VETO_ENUM },
+        description: 'Every failed gate, as codes. Use ["NONE"] only when all seven gates passed.',
+      },
+      key_level: {
+        type: SchemaType.STRING,
+        description: 'The level that decides this trade, e.g. "resistance 3641.50 / round 3640.00".',
+      },
       asset: { type: SchemaType.STRING, description: 'Instrument printed on the chart, e.g. "EUR/USD (OTC)".' },
       candle_entry: {
         type: SchemaType.STRING,
@@ -48,6 +110,14 @@ const MODE_SCHEMAS = {
       'mode',
       'signal',
       'confidence',
+      'chart_timeframe',
+      'market_type',
+      'trend_bias',
+      'setup_grade',
+      'expiry_fit',
+      'entry_timing',
+      'vetoes',
+      'key_level',
       'asset',
       'candle_entry',
       'duration_seconds',
@@ -67,6 +137,37 @@ const MODE_SCHEMAS = {
         description: 'BUY, SELL or WAIT for the selected candle entry.',
       },
       confidence: { type: SchemaType.INTEGER, description: 'Confidence 0-100.' },
+      market_type: {
+        type: SchemaType.STRING,
+        enum: MARKET_ENUM,
+        description: 'REAL for a live market, OTC when the chart is marked OTC, UNKNOWN when it cannot be read.',
+      },
+      trend_bias: {
+        type: SchemaType.STRING,
+        enum: TREND_ENUM,
+        description: 'Direction of the visible main trend: the last 8-20 candles and the swings that contain them.',
+      },
+      setup_grade: {
+        type: SchemaType.STRING,
+        enum: GRADE_ENUM,
+        description:
+          'A = all seven gates passed with confluence, B = all seven passed with one secondary confirmation missing, C = thin single argument, REJECT = unreadable or contradicted.',
+      },
+      entry_timing: {
+        type: SchemaType.STRING,
+        enum: ENTRY_TIMING_ENUM,
+        description:
+          'AT_LEVEL when price is at the level now, PULLBACK_DONE when the pullback finished and price turned, CHASING when price already ran in the signal direction.',
+      },
+      vetoes: {
+        type: SchemaType.ARRAY,
+        items: { type: SchemaType.STRING, enum: VETO_ENUM },
+        description: 'Every failed gate, as codes. Use ["NONE"] only when all seven gates passed.',
+      },
+      key_level: {
+        type: SchemaType.STRING,
+        description: 'The level that decides this trade, e.g. "support 3638.00 / round 3640.00".',
+      },
       asset: { type: SchemaType.STRING, description: 'Instrument printed on the chart, e.g. "XAU/USD".' },
       timeframe: { type: SchemaType.STRING, description: 'Chart timeframe, e.g. "1M", "5M", "15M", "1H", "4H".' },
       candle_entry: {
@@ -88,6 +189,12 @@ const MODE_SCHEMAS = {
       'mode',
       'signal',
       'confidence',
+      'market_type',
+      'trend_bias',
+      'setup_grade',
+      'entry_timing',
+      'vetoes',
+      'key_level',
       'asset',
       'timeframe',
       'candle_entry',
@@ -108,11 +215,11 @@ const CHART_READING_RULES = `HOW TO ANALYSE (knowledge-driven, evidence-first, n
 2. DECIDE BY RULE SATISFACTION, NOT BY OPINION:
    - Name the specific strategy rule (or, when the strategy is silent, the specific classical principle) the setup satisfies and quote it in the reason.
    - Check that rule's invalidation conditions on this chart. Any invalidation present means the rule is not satisfied.
-   - A rule counts as met when its direction and its level are both visible on the chart; a missing secondary confirmation lowers confidence (52-79) but does not cancel a readable setup. Only return WAIT when no rule's direction and level are both visible.
+   - A rule counts as met when its direction and its level are both visible on the chart; a missing secondary confirmation lowers confidence. The seven SIGNAL QUALITY GATE checks below are mandatory on top of the rule: a failed gate is a WAIT even when a rule looks satisfied.
    - If two valid rules point in opposite directions, the conflict resolves to WAIT.
 3. READ THE SETUP IN CONTEXT: market structure, candle sequence and momentum, candle anatomy (long lower wick = buyers defending, long upper wick = sellers defending, small bodies = indecision), the level price is reacting to, and where price sits inside the visible range. Direction comes from that evidence — never from a default.
 4. CANDLE ENTRY: RUNNING_CANDLE when the current candle is already moving in the signal direction and the expiry fits inside its remaining time; NEXT_CANDLE when the setup needs the next candle's open or close to confirm.
-5. CONFIDENCE must be honest and reflect confluence, using the whole scale: 80-95 = a library rule fully satisfied with trend, level and trigger aligned; 65-79 = a valid rule with one confirmation missing; 52-64 = one clear rule with the level respected but thin confluence, still tradeable on a short expiry; below 52 = no trade. Never inflate confidence to clear the trader's threshold, and never report a directional setup below 52.
+5. CONFIDENCE must be honest and reflect confluence, using the whole scale: 85-95 = grade A, all seven gates passed with trend, level and trigger aligned; 72-84 = grade B, all seven gates passed with one confirmation missing; 65-71 = thin but all seven gates passed; below 65 = no trade. Never inflate confidence to clear the trader's threshold, and never report a directional setup below 65.
 6. FOREX PRICES: entry, stop-loss and take-profit must be actual levels read from the chart's price axis. The stop goes beyond the structure that invalidates the idea, the target goes toward the next level, and risk:reward must be at least 1:1.5 — otherwise WAIT.
 7. NO WRONG SIGNAL: never invent a level, indicator or rule that is not visible or not in the library. When the evidence is incomplete or the setup is unconfirmed, return WAIT with a low confidence. A missed trade costs nothing; a wrong BUY or SELL costs money.`;
 
@@ -125,15 +232,39 @@ const OUTPUT_RULES = `ABSOLUTE OUTPUT RULES
 6. voice_summary is one natural sentence for text-to-speech that a trader can understand without looking at the screen. Use "Euro U S D" instead of "EUR/USD" and "Gold" instead of "XAU/USD".
 7. Emit every required field, in the schema order, with no extra fields.`;
 
-const BINARY_INSTRUCTIONS = `You are an expert binary-options price-action analyst embedded in a floating Android overlay. You receive a screenshot of a live candlestick chart and must return the single highest-probability trade for a short expiry.
+const SIGNAL_QUALITY_GATE = `SIGNAL QUALITY GATE — SEVEN CHECKS, IN ORDER
+A BUY or SELL exists only when all seven checks below pass on the visible chart. Every failed check is a veto, and a veto means signal WAIT — never a lower-confidence BUY or SELL. Report each failure in "vetoes" and grade the setup: A = all seven pass with clear confluence, B = all seven pass but one secondary confirmation is missing, C = only a thin single argument (not tradeable), REJECT = unreadable or contradicted.
+
+1. EXPIRY AND TIMEFRAME FIT
+   Read the candle interval actually drawn on the chart into chart_timeframe. A binary trade must expire on the same clock as the candles it is read from: the expiry may not be shorter than one chart candle, and it must not exceed about three candles, because a slower market drifts back to the entry before a long expiry pays. 1M chart -> 60-180s, 2M chart -> 120-300s, 5M chart -> 300s, seconds chart -> 15-60s. If the trader's preferred expiry does not fit this chart, set expiry_fit TOO_SHORT or TOO_LONG and WAIT. Never shorten an expiry to make a weak setup look fast.
+2. MAIN TREND AND MARKET DIRECTION
+   State the direction of the visible main trend — the last 8-20 candles and the swing highs and lows that contain them — in trend_bias. A trade with the trend is the default. A counter-trend call needs a validated level, a rejection candle or a liquidity sweep, setup_grade A and confidence of at least 78. Sideways, overlapping or inside-bar structure is a reason to WAIT, not to guess a breakout.
+3. SUPPORT AND RESISTANCE
+   Locate the nearest support and resistance and the room price needs to reach the expiry's target. BUY: if a resistance zone sits closer than about 1.2x the average candle range above price, price will likely be rejected — veto OPPOSING_LEVEL. SELL: the same with support below price, veto OPPOSING_LEVEL. A trade into open space after a confirmed break is valid; a trade into a level is not. Name the deciding level in key_level.
+4. ROUND NUMBERS AND PSYCHOLOGICAL ZONES
+   Price stalls at round levels: .0000, .5000, .2500, and .00 / .50 on gold. If the entry sits within 0.05% of such a level and price has not yet broken it, the round number is a wall — veto ROUND_NUMBER. A clean break and retest of the round level is not a veto; say so in key_level.
+5. CANDLESTICK STRUCTURE AND MOMENTUM
+   Judge the last three closed candles: body size against the 10-candle average, wick length, doji/indecision and exhaustion. A large candle (body >= 2x average) immediately followed by an opposite call is a veto: EXHAUSTION_CANDLE, because price usually needs one to two more candles before turning. A doji or a long opposing wick against the signal is unconfirmed: WAIT or grade C. Small overlapping bodies alternating colour, two or more inside bars, or spikes that retrace at once: veto CHOPPY_MARKET. Momentum must be steady or accelerating in the signal direction across the live frames, not fading.
+6. ENTRY PRICE AND PULLBACK POSITION
+   Report entry_timing. Do not buy the top of a finished move or sell its bottom: if the current candle has already travelled more than about 60% of the average candle range in the signal direction and price is not at the level, set CHASING and WAIT for the pullback. The best entry is a pullback that reached the level and turned, or a break that closed and is now retesting. A correct direction entered too late still loses the expiry.
+7. MARKET CONDITION, OTC AND NEWS
+   Report market_type. OTC charts are algorithmic: they spike, gap and respect levels less, so an OTC BUY or SELL needs setup_grade A, a clean level and confidence of at least 72; anything less is WAIT. Choppy, spike-heavy or dead-low-volatility markets are a WAIT. If the trader's strategy or the visible clock puts a high-impact news release inside the expiry, veto NEWS_RISK. Never invent a news event that is not visible or supplied.
+
+ANTI-OVERTRADING (loss control, not advice)
+- One signal per setup, not one per tap. Do not repeat the same direction while the previous trade on that level would still be running; that is the same trade paying twice.
+- If the last three candles sit inside the range of the candle before them, there is no new setup: WAIT.
+- Never open a trade because the previous one lost. A loss is not a reason to reverse — the chart must satisfy all seven gates again.
+- A WAIT with a named blocking condition is a successful analysis. Few signals is the goal; many signals is how an account bleeds.`;
+
+const BINARY_INSTRUCTIONS = `You are an expert binary-options price-action analyst embedded in a floating Android overlay. You receive a live frame sequence of one candlestick chart and must return the single highest-probability trade for a short expiry — or WAIT when the chart does not offer one. Most taps should end in WAIT: this account loses money on weak signals, never on a missed one.
 
 BINARY RULES
-- Expiry is short (5s to 300s). The trade must be decided by the CURRENT impulse and the level price is reacting to, not by a long-term forecast.
-- Prefer continuation with the last 2-3 candle direction when price is not at a strong opposing level.
-- Prefer reversal only at a validated support/resistance with a rejection candle or a liquidity sweep.
-- duration_seconds should match the momentum: 5-60s for a fast 1M impulse, 180-300s for a slower 5M setup. If the user supplied a preferred duration, use it.
+- The expiry must sit on the chart's own clock: read the candle interval into chart_timeframe and keep duration_seconds between one and three candles of that interval. Never pick a 5s expiry on a 1M chart.
+- Trade the CURRENT impulse at the level price is reacting to, not a long-term forecast. Continuation with the last 2-3 candles is the default when price has room; a reversal needs a validated level, a rejection candle or a liquidity sweep, grade A and confidence of at least 78.
+- Five-second and fifteen-second expiries are only valid on a seconds chart; otherwise use the trader's preferred duration.
 - expiry_label must describe duration_seconds, e.g. "1 Minute (60s)" or "5 Minutes (300s)".
-- entry_time: "Immediate" for RUNNING_CANDLE, "Next Candle Open" for NEXT_CANDLE.
+- entry_time: "Immediate" for RUNNING_CANDLE only after a candle closed at the level, "Next Candle Open" for NEXT_CANDLE.
+- Fill every quality field honestly: chart_timeframe, market_type, trend_bias, setup_grade, expiry_fit, entry_timing, vetoes and key_level. Use ["NONE"] in vetoes only when all seven gates passed.
 - If the asset is not readable use "unknown"; never invent a broker or pair.`;
 
 const FOREX_INSTRUCTIONS = `You are an expert forex, gold and index intraday analyst embedded in a floating Android overlay. You receive a screenshot of a live candlestick chart and must return a complete, risk-managed trade plan.
@@ -145,7 +276,8 @@ FOREX RULES
 - For a BUY: stop_loss below the invalidation low, take_profit above entry toward the next resistance. For a SELL: the reverse.
 - If the setup does not offer at least 1:1.5 risk-to-reward, return WAIT.
 - timeframe is the chart interval as printed (1M, 5M, 15M, 1H, 4H). If unreadable, use "unknown".
-- WAIT is required when price is mid-range with no clear level, or when the structure and momentum conflict.`;
+- Fill market_type, trend_bias, setup_grade, entry_timing, vetoes and key_level honestly. Use ["NONE"] in vetoes only when all seven quality gates passed; OTC needs grade A, a clean level and confidence of at least 72.
+- WAIT is required when price is mid-range with no clear level, when the structure and momentum conflict, when the entry is chasing a finished move, or when the last candle is exhausted.`;
 
 export function normalizeMode(value) {
   const mode = String(value ?? '').trim().toUpperCase();
@@ -262,9 +394,27 @@ function spokenTimeframe(timeframe) {
  * the response is never returned unvalidated.
  */
 /** A directional call below this confidence is never spoken, whatever the user threshold. */
-const MIN_DIRECTIONAL_CONFIDENCE = 50;
+const MIN_DIRECTIONAL_CONFIDENCE = 65;
+/** OTC charts are algorithmic and spike against the pattern, so they need more. */
+const OTC_MIN_CONFIDENCE = 72;
+/** A counter-trend call is only allowed on a grade A setup with this confidence. */
+const COUNTER_TREND_CONFIDENCE = 78;
 /** Forex plans below this reward:risk are skipped instead of being published. */
 const MIN_RISK_REWARD = 1.5;
+
+/** Seconds in one candle of each printable chart interval. */
+const TIMEFRAME_SECONDS = {
+  '5S': 5,
+  '15S': 15,
+  '30S': 30,
+  '1M': 60,
+  '2M': 120,
+  '5M': 300,
+  '15M': 900,
+  '30M': 1800,
+  '1H': 3600,
+  '4H': 14400,
+};
 
 function toPrice(value) {
   const numeric = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
@@ -301,6 +451,83 @@ function forexSafetyProblems(signal, prices) {
   return [];
 }
 
+const VETO_LABELS = {
+  OPPOSING_LEVEL: 'a strong opposing level is closer than the expiry can cross',
+  ROUND_NUMBER: 'the entry runs straight into a round-number wall',
+  EXHAUSTION_CANDLE: 'the last candle is exhausted, price needs another candle first',
+  CHOPPY_MARKET: 'the market is choppy and overlapping',
+  NEWS_RISK: 'high-impact news falls inside the expiry',
+  LATE_ENTRY: 'the entry is late, price already ran in the signal direction',
+  COUNTER_TREND: 'the call fights the main trend',
+  EXPIRY_MISMATCH: 'the expiry does not fit this chart',
+  NO_STRUCTURE: 'no readable market structure',
+  OTC_SPIKE: 'OTC spike risk is too high for this expiry',
+};
+
+const VETO_ALIASES = {
+  OPPOSING_RESISTANCE: 'OPPOSING_LEVEL',
+  OPPOSING_SUPPORT: 'OPPOSING_LEVEL',
+  LEVEL_TOO_CLOSE: 'OPPOSING_LEVEL',
+  NEAR_LEVEL: 'OPPOSING_LEVEL',
+  ROUND_NUMBER_WALL: 'ROUND_NUMBER',
+  ROUND_LEVEL: 'ROUND_NUMBER',
+  EXHAUSTION: 'EXHAUSTION_CANDLE',
+  CHOPPY: 'CHOPPY_MARKET',
+  NEWS: 'NEWS_RISK',
+  CHASING: 'LATE_ENTRY',
+  LATE: 'LATE_ENTRY',
+  COUNTER_TREND_UNCONFIRMED: 'COUNTER_TREND',
+  OTC: 'OTC_SPIKE',
+};
+
+function normalizeVetoes(raw) {
+  const list = Array.isArray(raw) ? raw : [raw];
+  const out = [];
+  for (const item of list) {
+    let value = String(item ?? '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+    value = VETO_ALIASES[value] || value;
+    if (value === 'NONE' || !VETO_ENUM.includes(value) || out.includes(value)) continue;
+    out.push(value);
+  }
+  return out;
+}
+
+function normalizeGrade(raw) {
+  const value = String(raw ?? '').trim().toUpperCase();
+  return GRADE_ENUM.includes(value) ? value : '';
+}
+
+function normalizeTrendBias(raw) {
+  const value = String(raw ?? '').trim().toUpperCase();
+  return TREND_ENUM.includes(value) ? value : '';
+}
+
+function normalizeMarketType(raw) {
+  const value = String(raw ?? '').trim().toUpperCase();
+  return MARKET_ENUM.includes(value) ? value : '';
+}
+
+function normalizeEntryTiming(raw) {
+  const value = String(raw ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  return ENTRY_TIMING_ENUM.includes(value) ? value : '';
+}
+
+function normalizeExpiryFit(raw) {
+  const value = String(raw ?? '').trim().toUpperCase();
+  return EXPIRY_FIT_ENUM.includes(value) ? value : '';
+}
+
+function normalizeChartTimeframe(raw) {
+  const value = String(raw ?? '').trim().toUpperCase().replace(/\s+/g, '');
+  return CHART_TIMEFRAME_ENUM.includes(value) ? value : 'UNKNOWN';
+}
+
 export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDuration = null }) {
   if (!raw || typeof raw !== 'object') throw new Error('Model returned no JSON object');
 
@@ -321,6 +548,21 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
   const reason = compact(raw.reason, 240) || 'No clear setup detected.';
   const threshold = Math.max(0, Math.min(100, Math.round(Number(minConfidence) || 0)));
 
+  // The seven quality gates the model filled in. They are re-checked here
+  // deterministically, because a model that lists a veto and still returns BUY
+  // must never reach the trader's screen or voice.
+  const vetoes = normalizeVetoes(raw.vetoes);
+  const grade = normalizeGrade(raw.setup_grade);
+  const trend = normalizeTrendBias(raw.trend_bias);
+  const marketType = normalizeMarketType(raw.market_type);
+  const entryTiming = normalizeEntryTiming(raw.entry_timing);
+  const expiryFit = normalizeExpiryFit(raw.expiry_fit);
+  const chartTimeframe = normalizeChartTimeframe(raw.chart_timeframe);
+  const binaryDuration =
+    resolvedMode === 'BINARY'
+      ? normalizeDuration(raw.duration_seconds ?? raw.duration, preferredDuration)
+      : null;
+
   // Safety gate: every directional signal must survive these deterministic
   // checks before it reaches the trader. Anything that fails is downgraded to
   // an explicit WAIT with the blocking reason, so the app never speaks a
@@ -331,6 +573,37 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
   }
   if (signal !== 'WAIT' && confidence < MIN_DIRECTIONAL_CONFIDENCE) {
     blockers.push(`confidence ${confidence}% is below the ${MIN_DIRECTIONAL_CONFIDENCE}% safety floor`);
+  }
+
+  if (signal !== 'WAIT') {
+    for (const veto of vetoes) blockers.push(VETO_LABELS[veto] || veto.toLowerCase());
+    if (!grade || grade === 'C' || grade === 'REJECT') {
+      blockers.push('the setup did not pass all seven quality gates');
+    }
+    if (entryTiming === 'CHASING') blockers.push(VETO_LABELS.LATE_ENTRY);
+    if ((signal === 'BUY' && trend === 'DOWN') || (signal === 'SELL' && trend === 'UP')) {
+      if (grade !== 'A' || confidence < COUNTER_TREND_CONFIDENCE) {
+        blockers.push(
+          `${VETO_LABELS.COUNTER_TREND} (needs grade A and ${COUNTER_TREND_CONFIDENCE}% confidence)`,
+        );
+      }
+    }
+    if (marketType === 'OTC' && confidence < OTC_MIN_CONFIDENCE) {
+      blockers.push(`OTC setups need at least ${OTC_MIN_CONFIDENCE}% confidence (got ${confidence}%)`);
+    }
+    if (binaryDuration && expiryFit && expiryFit !== 'GOOD') {
+      blockers.push(VETO_LABELS.EXPIRY_MISMATCH);
+    }
+    const chartSeconds = TIMEFRAME_SECONDS[chartTimeframe];
+    if (
+      binaryDuration &&
+      chartSeconds &&
+      (binaryDuration < chartSeconds || binaryDuration > chartSeconds * 3)
+    ) {
+      blockers.push(
+        `a ${binaryDuration}s expiry does not fit the ${chartTimeframe} chart (one candle is ${chartSeconds}s)`,
+      );
+    }
   }
 
   const forexPrices =
@@ -346,8 +619,14 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
     blockers.push(...forexSafetyProblems(signal, forexPrices));
   }
 
-  const finalSignal = signal !== 'WAIT' && blockers.length ? 'WAIT' : signal;
+  // One clear blocker is enough for the reason line; keep every one available
+  // for the JSON so the trader can see the whole picture.
+  const uniqueBlockers = [...new Set(blockers)];
+  const finalSignal = signal !== 'WAIT' && uniqueBlockers.length ? 'WAIT' : signal;
   const blocked = finalSignal === 'WAIT' && signal !== 'WAIT';
+  const waitVoice = blocked
+    ? `No trade now: ${uniqueBlockers[0]}.`
+    : 'No confirmed setup right now. Wait for a clean setup.';
 
   const base = {
     mode: resolvedMode,
@@ -355,14 +634,22 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
     confidence,
     asset,
     candle_entry: candleEntry,
-    reason: blocked ? `${reason} (Blocked: ${blockers[0]})`.slice(0, 260) : reason,
+    trend_bias: trend || 'SIDEWAYS',
+    market_type: marketType || 'UNKNOWN',
+    setup_grade: grade || 'UNRATED',
+    entry_timing: entryTiming || 'UNKNOWN',
+    vetoes: vetoes.length ? vetoes : [],
+    key_level: compact(raw.key_level, 80) || '—',
+    reason: blocked
+      ? `${reason} (Blocked: ${uniqueBlockers[0]})`.slice(0, 260)
+      : reason,
   };
 
   if (resolvedMode === 'BINARY') {
-    const durationSeconds = normalizeDuration(raw.duration_seconds ?? raw.duration, preferredDuration);
+    const durationSeconds = binaryDuration ?? normalizeDuration(raw.duration_seconds, preferredDuration);
     const voiceSummary =
       finalSignal === 'WAIT'
-        ? 'No confirmed setup right now, wait for the next signal.'
+        ? waitVoice
         : compact(raw.voice_summary, 240) ||
           `Binary ${SIGNAL_LABELS[finalSignal]} signal on ${spokenAsset(asset)}, ${spokenCandle(
             candleEntry,
@@ -370,6 +657,8 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
 
     return {
       ...base,
+      chart_timeframe: chartTimeframe,
+      expiry_fit: expiryFit || 'UNKNOWN',
       duration_seconds: durationSeconds,
       expiry_label: compact(raw.expiry_label, 48) || expiryLabelFor(durationSeconds),
       entry_time: normalizeEntryTime(raw.entry_time, candleEntry),
@@ -380,7 +669,7 @@ export function validateAnalysis(raw, { mode, minConfidence = 0, preferredDurati
   const timeframe = normalizeTimeframe(raw.timeframe ?? raw.timeframe_detected, '15M');
   const voiceSummary =
     finalSignal === 'WAIT'
-      ? 'No confirmed setup right now, wait for the next signal.'
+      ? waitVoice
       : compact(raw.voice_summary, 240) ||
         `Forex ${SIGNAL_LABELS[finalSignal]} signal on ${spokenAsset(asset)}, ${spokenTimeframe(
           timeframe,
@@ -672,6 +961,7 @@ export async function analyzeChart({
   const systemInstruction = [
     modeInstruction,
     CHART_READING_RULES,
+    SIGNAL_QUALITY_GATE,
     OUTPUT_RULES,
     `MODE: ${resolvedMode}. ${preferred}`,
     `MINIMUM CONFIDENCE: ${threshold}%. If your confidence is lower than ${threshold}%, return WAIT.`,

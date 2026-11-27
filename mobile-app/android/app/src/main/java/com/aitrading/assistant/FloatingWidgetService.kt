@@ -126,6 +126,15 @@ class FloatingWidgetService : Service() {
         private const val ANALYSIS_INTERVAL_MS = 6_000L
         /** An answer this fresh is delivered on tap without another scan. */
         private const val CACHE_FRESH_MS = 20_000L
+
+        /**
+         * One signal per trade, not one per tap. After a BUY or SELL is delivered
+         * the widget refuses the next trade until that expiry (plus a small
+         * buffer) has finished, because a tap 20 s later only re-enters the same
+         * setup that is already running.
+         */
+        private const val SIGNAL_COOLDOWN_BUFFER_MS = 15_000L
+        private const val SIGNAL_COOLDOWN_MIN_MS = 75_000L
         private const val CAPTURE_DELAY_MS = 300L
         // A live clip, not a still: the model has to see the candle move.
         private const val LIVE_FRAME_COUNT = 4
@@ -201,6 +210,9 @@ class FloatingWidgetService : Service() {
     /** Latest background answer, shown only when the trader taps for it. */
     private var cachedAnalysis: JSONObject? = null
     private var cachedAt = 0L
+    /** A delivered BUY/SELL keeps the widget in cooldown until this moment. */
+    private var signalCooldownUntil = 0L
+    private var lastDeliveredSignal = ""
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -515,7 +527,9 @@ class FloatingWidgetService : Service() {
     private fun attachActions(view: View) {
         deliverButton?.setOnClickListener { deliverSignal() }
         analyzeButton?.setOnClickListener {
-            // Rescan is manual too: one chart read, one result.
+            // Rescan is manual too: one chart read, one result. It still cannot
+            // hand out a second trade while the last one is open.
+            if (showCooldownIfActive()) return@setOnClickListener
             showWhenReady = true
             clearSignalCard()
             if (!analyzing) captureAndAnalyze()
@@ -753,7 +767,10 @@ class FloatingWidgetService : Service() {
             }
 
             if (resolvedMode == MODE_FOREX) {
-                timingText?.text = "Timeframe: ${analysis.optString("timeframe", "—")}"
+                val grade = analysis.optString("setup_grade", "—").ifBlank { "—" }
+                val market = analysis.optString("market_type", "—").ifBlank { "—" }
+                timingText?.text =
+                    "Timeframe: ${analysis.optString("timeframe", "—")} · Grade $grade · $market"
                 levelsText?.text = buildString {
                     append("Entry ").append(analysis.optString("entry_price", "—"))
                     append("  ·  SL ").append(analysis.optString("stop_loss", "—"))
@@ -762,8 +779,11 @@ class FloatingWidgetService : Service() {
             } else {
                 val seconds = analysis.optInt("duration_seconds", 60)
                 val expiry = analysis.optString("expiry_label").ifBlank { "${seconds}s" }
+                val grade = analysis.optString("setup_grade", "—").ifBlank { "—" }
+                val trend = analysis.optString("trend_bias", "—").ifBlank { "—" }
+                val market = analysis.optString("market_type", "—").ifBlank { "—" }
                 timingText?.text = "Duration: $expiry  ·  ${analysis.optString("entry_time", "—")}"
-                levelsText?.text = "Expiry ${seconds}s"
+                levelsText?.text = "Expiry ${seconds}s · Grade $grade · Trend $trend · $market"
             }
 
             reasonText?.text = analysis.optString("reason", "")
@@ -887,10 +907,13 @@ class FloatingWidgetService : Service() {
     private fun deliverSignal() {
         if (!isRunning) return
 
+        if (showCooldownIfActive()) return
+
         val cached = cachedAnalysis
         if (cached != null && System.currentTimeMillis() - cachedAt < CACHE_FRESH_MS) {
             renderAnalysis(cached, speak = true)
             broadcastAnalysis(cached)
+            noteDeliveredSignal(cached)
             updateStatus("Signal delivered · ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}")
             return
         }
@@ -900,6 +923,67 @@ class FloatingWidgetService : Service() {
         updateStatus("Scanning…")
         // A background scan may be in flight: its answer is this tap's signal.
         if (!analyzing) captureAndAnalyze()
+    }
+
+    /**
+     * A new trade may not start while the previous one is still running. Tapping
+     * Get signal inside that window shows the cooldown card instead of entering
+     * the same setup again, which is what turned one bad read into eleven trades.
+     */
+    private fun showCooldownIfActive(): Boolean {
+        val remaining = signalCooldownUntil - System.currentTimeMillis()
+        if (remaining <= 0L) return false
+
+        val secondsLeft = ((remaining + 999) / 1000).toInt()
+        val signal = lastDeliveredSignal.ifBlank { "last" }
+        val analysis = JSONObject()
+            .put("mode", mode)
+            .put("signal", "WAIT")
+            .put("confidence", 0)
+            .put("asset", "Cooldown")
+            .put("candle_entry", "NEXT_CANDLE")
+            .put("setup_grade", "—")
+            .put("trend_bias", "—")
+            .put("market_type", "—")
+            .put(
+                "reason",
+                "Cooldown: the last $signal trade is still open for ${secondsLeft}s. " +
+                    "No new trade until it expires — wait for the candle to close.",
+            )
+            .put(
+                "voice_summary",
+                "Cooldown. Wait ${secondsLeft} seconds for the last trade to close before the next one.",
+            )
+
+        if (mode == MODE_FOREX) {
+            analysis
+                .put("timeframe", "—")
+                .put("entry_price", "—")
+                .put("stop_loss", "—")
+                .put("take_profit", "—")
+        } else {
+            analysis
+                .put("duration_seconds", 0)
+                .put("expiry_label", "Cooldown")
+                .put("entry_time", "After the trade closes")
+        }
+
+        renderAnalysis(analysis, speak = true)
+        broadcastAnalysis(analysis)
+        return true
+    }
+
+    /** Starts the no-new-trade window once a directional signal is delivered. */
+    private fun noteDeliveredSignal(analysis: JSONObject) {
+        val signal = analysis.optString("signal").uppercase(Locale.US)
+        if (signal != "BUY" && signal != "SELL") return
+
+        val seconds = analysis.optInt("duration_seconds", 60).coerceIn(15, 300)
+        val waitMs = maxOf(SIGNAL_COOLDOWN_MIN_MS, seconds * 1000L + SIGNAL_COOLDOWN_BUFFER_MS)
+        signalCooldownUntil = System.currentTimeMillis() + waitMs
+        lastDeliveredSignal = signal
+        // The cached answer was just traded: a new tap must read the chart again.
+        forgetCachedSignal()
     }
 
     private fun captureAndAnalyze() {
@@ -1246,6 +1330,7 @@ class FloatingWidgetService : Service() {
                 if (showNow) {
                     renderAnalysis(analysis, speak = speakNow)
                     broadcastAnalysis(analysis)
+                    noteDeliveredSignal(analysis)
                 }
                 finishAnalysis(delivered = showNow)
             } catch (error: Exception) {

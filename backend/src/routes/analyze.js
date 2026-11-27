@@ -122,6 +122,54 @@ function optionalNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+/**
+ * The last directional signal per user and mode. The model can be right about
+ * direction and still be tapped into eleven trades in fifteen minutes: the same
+ * setup delivered repeatedly on every tap. A new trade may not start while the
+ * previous one would still be inside its expiry, so that window is closed here
+ * as well as in the Android widget.
+ */
+const recentSignals = new Map();
+const COOLDOWN_MIN_MS = 75_000;
+const COOLDOWN_BUFFER_MS = 15_000;
+
+function applySignalCooldown(userId, analysis) {
+  const key = `${userId}:${analysis.mode}`;
+  const now = Date.now();
+
+  if (recentSignals.size > 500) {
+    for (const [entryKey, entry] of recentSignals) {
+      if (entry.until <= now) recentSignals.delete(entryKey);
+    }
+  }
+
+  const previous = recentSignals.get(key);
+  if (analysis.signal === 'WAIT') return { analysis, cooldownSeconds: 0 };
+
+  if (previous && previous.until > now) {
+    const secondsLeft = Math.ceil((previous.until - now) / 1000);
+    return {
+      analysis: {
+        ...analysis,
+        signal: 'WAIT',
+        confidence: 0,
+        reason: `Cooldown: last ${previous.signal} trade is still open for ${secondsLeft}s. No new trade until it expires.`,
+        voice_summary: `Cooldown. The last trade still has ${secondsLeft} seconds to run. No new trade yet.`,
+      },
+      cooldownSeconds: secondsLeft,
+    };
+  }
+
+  const duration = Math.max(15, Math.min(300, Math.round(Number(analysis.duration_seconds) || 60)));
+  const waitMs = Math.max(COOLDOWN_MIN_MS, duration * 1000 + COOLDOWN_BUFFER_MS);
+  recentSignals.set(key, {
+    signal: analysis.signal,
+    until: now + waitMs,
+    duration,
+  });
+  return { analysis, cooldownSeconds: 0 };
+}
+
 router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'), async (req, res, next) => {
   try {
     // Re-read the account on every scan so suspensions and activations apply immediately.
@@ -166,7 +214,12 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
       optionalString(body.user_custom_strategy, 4000) ||
       (mode === 'BINARY' ? savedSettings.binary_strategy : savedSettings.forex_strategy);
 
-    const { analysis, strategySource, model, modelsAttempted } = await analyzeChart({
+    const {
+      analysis: freshAnalysis,
+      strategySource,
+      model,
+      modelsAttempted,
+    } = await analyzeChart({
       imageBase64: image.data,
       mimeType: image.mimeType,
       frames: liveFrames,
@@ -180,6 +233,8 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
       preferredTimeframe,
     });
 
+    const { analysis, cooldownSeconds } = applySignalCooldown(user.id, freshAnalysis);
+
     await logActivity({
       userId: user.id,
       action: 'SIGNAL_SCAN',
@@ -191,6 +246,13 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
         candle_entry: analysis.candle_entry,
         duration_seconds: analysis.duration_seconds,
         timeframe: analysis.timeframe,
+        chart_timeframe: analysis.chart_timeframe,
+        setup_grade: analysis.setup_grade,
+        trend_bias: analysis.trend_bias,
+        market_type: analysis.market_type,
+        vetoes: analysis.vetoes,
+        key_level: analysis.key_level,
+        cooldown_seconds: cooldownSeconds || undefined,
         min_confidence: Math.round(minConfidence),
         model,
         models_attempted: modelsAttempted,
@@ -203,6 +265,8 @@ router.post('/analyze-chart', analyzeLimiter, requireUser, upload.single('image'
     res.set('X-Gemini-Model', model);
     res.set('X-Gemini-Attempts', String(modelsAttempted.length));
     res.set('X-Signal-Mode', analysis.mode);
+    if (analysis.setup_grade) res.set('X-Setup-Grade', String(analysis.setup_grade));
+    if (cooldownSeconds) res.set('X-Signal-Cooldown', String(cooldownSeconds));
     return res.json(analysis);
   } catch (error) {
     if (String(error.message).includes('timed out')) {
